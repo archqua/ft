@@ -1,0 +1,375 @@
+const std = @import("std");
+const builtin = std.builtin;
+const Allocator = std.mem.Allocator;
+const json = std.json;
+const testing = std.testing;
+const expect = testing.expect;
+
+const ztring = []u8;
+const ctring = []const u8;
+pub const Person = struct {
+    id: Id = .{},
+    name: ?Name = null,
+    surname: ?Surname = null,
+    patronymic: ?Patronymic = null,
+    sex: ?Sex = null,
+    birth_date: ?Date = null,
+    death_date: ?Date = null,
+    notes: ?Notes = null,
+    pub fn toJsonAlloc(
+        self: Person,
+        ator: Allocator,
+    ) ![]u8 {
+        return try json.stringifyAlloc(ator, self, std.json.StringifyOptions{});
+    }
+    pub fn toJsonWrite(
+        self: Person,
+        out_stream: anytype,
+    ) @TypeOf(out_stream).Error!void {
+        return try json.stringify(self, std.json.StringifyOptions{}, out_stream);
+    }
+    pub const FromJsonError = error { bad_json_type, bad_json_field, };
+    pub const FromJsonOptions = struct { ator: ?Allocator = null, };
+    pub fn initFromJson(
+        person: *@This(),
+        object_map: json.Value,
+        options: FromJsonOptions,
+    ) !void {
+        switch (object_map) {
+            json.Value.Object => |map| {
+                inline for (@typeInfo(@This()).Struct.fields) |field| {
+                    if (map.get(field.name)) |val| {
+                        switch (val) {
+                            json.Value.Null => {
+                                if (field.field_type == Id) {
+                                    return FromJsonError.bad_json_field;
+                                } else {
+                                    @field(person.*, field.name) = null;
+                                }
+                            },
+                            else => {
+                                if (field.field_type == Id) {
+                                    try @field(person.*, field.name).initFromJson(val, options);
+                                } else {
+                                    if (@field(person.*, field.name) == null) {
+                                        @field(person.*, field.name) = .{};
+                                    }
+                                    try @field(person.*, field.name).?.initFromJson(val, options);
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Id = struct {
+    data: i64 = undefined,
+    pub const FromJsonError = error { bad_json_type, };
+    pub fn initFromJson(
+        id: *@This(),
+        json_id: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        _ = options;
+        switch (json_id) {
+            json.Value.Integer => |int| {
+                id.data = int;
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Name = struct {
+    short_form: ?ctring = null,
+    normal_form: ctring = undefined,
+    full_form: ?ctring = null,
+    // for patronymic autogeneration
+    // for normal_form=Peter patronymic_form would mean Peter's son
+    patronymic_male_form: ?ctring = null,
+    patronymic_female_form: ?ctring = null,
+    pub const FromJsonError = error { bad_json_type, bad_json_field, };
+    pub fn initFromJson(
+        name: *@This(),
+        json_name: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        switch (json_name) {
+            json.Value.String, json.Value.NumberString => |str| {
+                if (options.ator) |ator| {
+                    name.normal_form = try strCopyAlloc(str, ator);
+                } else {
+                    name.normal_form = str;
+                }
+            },
+            json.Value.Object => |map| {
+                if (options.ator) |ator| {
+                    inline for (@typeInfo(Name).Struct.fields) |field| {
+                        if (map.get(field.name)) |val| {
+                            switch (val) {
+                                json.Value.String, json.Value.NumberString => |str| {
+                                    // switch (@typeInfo(field.field_type)) {
+                                    //     builtin.TypeInfo.Optional => {
+                                    //         if (@field(name.*, field.name) == null)
+                                    //             @field(name.*, field.name) = "";
+                                    //         try strCopyAlloc(str, &@field(name.*, field.name).?, ator);
+                                    //     },
+                                    //     else => {
+                                    //         try strCopyAlloc(str, &@field(name.*, field.name), ator);
+                                    //     },
+                                    // }
+                                    switch (field.field_type) {
+                                        ?ctring => {
+                                            if (@field(name.*, field.name) == null)
+                                                @field(name.*, field.name) = "";
+                                            @field(name.*, field.name).? = try strCopyAlloc(str, ator);
+                                        },
+                                        ctring => {
+                                            @field(name.*, field.name) = try strCopyAlloc(str, ator);
+                                        },
+                                        else => {
+                                            @compileLog("Name field nonexhaustive switch");
+                                        },
+                                    }
+                                },
+                                else => { return FromJsonError.bad_json_field; },
+                            }
+                        }
+                    }
+                } else {
+                    inline for (@typeInfo(Name).Struct.fields) |field| {
+                        if (map.get(field.name)) |val| {
+                            switch (val) {
+                                json.Value.String, json.Value.NumberString => |str| {
+                                    @field(name.*, field.name) = str;
+                                },
+                                else => { return FromJsonError.bad_json_field; },
+                            }
+                        }
+                    }
+                }
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Surname = struct {
+    male_form: ctring = undefined,
+    female_form: ?ctring = null,
+    short_form: ?ctring = null,
+    pub const FromJsonError = error { bad_json_type, bad_json_field, };
+    pub fn initFromJson(
+        surname: *@This(),
+        json_surname: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        switch (json_surname) {
+            json.Value.String, json.Value.NumberString => |str| {
+                if (options.ator) |ator| {
+                    surname.male_form = try strCopyAlloc(str, ator);
+                } else {
+                    surname.male_form = str;
+                }
+            },
+            json.Value.Object => |map| {
+                if (options.ator) |ator| {
+                    inline for (@typeInfo(Surname).Struct.fields) |field| {
+                        if (map.get(field.name)) |val| {
+                            switch (val) {
+                                json.Value.String, json.Value.NumberString => |str| {
+                                    @field(surname.*, field.name) = try strCopyAlloc(str, ator);
+                                },
+                                else => { return FromJsonError.bad_json_field; },
+                            }
+                        }
+                    }
+                } else {
+                    inline for (@typeInfo(Surname).Struct.fields) |field| {
+                        if (map.get(field.name)) |val| {
+                            switch (val) {
+                                json.Value.String, json.Value.NumberString => |str| {
+                                    @field(surname.*, field.name) = str;
+                                },
+                                else => { return FromJsonError.bad_json_field; },
+                            }
+                        }
+                    }
+                }
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Patronymic = struct {
+    data: ctring = undefined,
+    pub const FromJsonError = error { bad_json_type };
+    pub fn initFromJson(
+        patronymic: *@This(),
+        json_patronymic: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        switch (json_patronymic) {
+            json.Value.String, json.Value.NumberString => |str| {
+                if (options.ator) |ator| {
+                    patronymic.data = try strCopyAlloc(str, ator);
+                } else {
+                    patronymic.data = str;
+                }
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Sex = struct {
+    data: enum {male, female} = undefined,
+    pub const FromJsonError = error { bad_json_type, bad_json_field };
+    pub fn initFromJson(
+        sex: *@This(),
+        json_sex: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        _ = options;
+        switch (json_sex) {
+            json.Value.String => |str| {
+                if (strEqual("male", str)) {
+                    sex.data = .male;
+                } else if (strEqual("female", str)) {
+                    sex.data = .female;
+                } else {
+                    return FromJsonError.bad_json_field;
+                }
+            },
+            json.Value.Integer => |int| {
+                switch (int) {
+                    0 => {
+                        sex.data = .male;
+                    },
+                    1 => {
+                        sex.data = .female;
+                    },
+                    else => {
+                        return FromJsonError.bad_json_field;
+                    },
+                }
+            },
+            else => { return FromJsonError.bad_json_type; },
+        }
+    }
+};
+
+pub const Date = struct {
+    day: u5 = undefined,
+    month: u4 = undefined,
+    year: i23 = undefined, // Date can hypothetically fit 32 bytes if needed
+    pub const ValidationError = error { invalid_day, invalid_month, invalid_year, };
+    pub const FromJsonError = error { bad_json_type, bad_json_field, missing_json_field };
+    const month2daycount = [12]u8{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    pub fn validate(self: anytype) ValidationError!void {
+        if (self.year == 0) {
+            return ValidationError.invalid_year;
+        }
+        if (self.month == 0 or self.month > 12) {
+            return ValidationError.invalid_month;
+        }
+        if (self.month == 2 and (
+                @rem(self.year, 400) == 0 or (
+                    @rem(self.year, 100) != 0 and @rem(self.year, 4) == 0
+                )
+            )) {
+            // leap year
+            if (self.day == 0 or self.day > 29) {
+                return ValidationError.invalid_day;
+            }
+        } else {
+            if (self.day == 0 or self.day > Date.month2daycount[self.month-1]) {
+                return ValidationError.invalid_day;
+            }
+        }
+    }
+    pub fn dmy(d: u5, m: u4, y: i23) ValidationError!Date {
+        const res = Date{.day=d, .month=m, .year=y};
+        try res.validate();
+        return res;
+    }
+    pub fn initFromJson(
+        date: *Date,
+        json_date: json.Value,
+        options: Person.FromJsonOptions,
+    ) !void {
+        _ = options;
+        switch (json_date) {
+            json.Value.Object => |map| {
+                var predate = .{.day=@as(i64, 0), .month=@as(i64,0), .year=@as(i64,0)};
+                inline for (@typeInfo(Date).Struct.fields) |field| {
+                    if (map.get(field.name)) |val| {
+                        switch (val) {
+                            json.Value.Integer => |int| {
+                                @field(predate, field.name) = int;
+                            },
+                            else => { FromJsonError.bad_json_field; }
+                        }
+                    } else {
+                        return FromJsonError.missing_json_field;
+                    }
+                }
+                try validate(predate);
+                if (predate.year > @exp2(23)-1 or predate.year < -@exp2(23)) {
+                    return ValidationError.invalid_year;
+                }
+                inline for (@typeInfo(Date).Struct.fields) |field| {
+                    @field(date, field.name) = @intCast(field.field_type, @field(predate, field.name));
+                }
+            },
+            else => { return FromJsonError.bad_json_type; }
+        }
+    }
+};
+
+pub const Notes = Patronymic; // for now both Patronymic and Notes are wrapped ctrings
+
+test "person json" {
+    var parser = json.Parser.init(testing.allocator, false);
+    defer parser.deinit();
+    const peter_source =
+        \\{
+        \\  "id": 1,
+        // \\  "name": {"normal_form": "Peter"},
+        // \\  "surname": {"male_form": "Zakharov"},
+        // \\  "patronymic": "Nikolaevich",
+        \\  "sex": male,
+        // \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
+        \\  "death_date": null,
+        \\  "notes": null
+        \\}
+    ;
+    var json_tree = try parser.parse(peter_source);
+    var json_peter = json_tree.root;
+    var Peter = Person{ .id=.{.data=0}, };
+    try Peter.initFromJson(json_peter, .{.ator=testing.allocator});
+}
+
+fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {
+    var res = try ator.alloc(u8, from.len);
+    for (from) |c, i| {
+        res[i] = c;
+    }
+    return res;
+}
+
+fn strEqual(lhs: []const u8, rhs: []const u8) bool {
+    if (lhs.len != rhs.len)
+        return false;
+    for (lhs) |c, i| {
+        if (c != rhs[i])
+            return false;
+    }
+    return true;
+}
+
