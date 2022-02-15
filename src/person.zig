@@ -1,53 +1,90 @@
 const std = @import("std");
+const date_module = @import("date.zig");
+const Date = date_module.Date;
+const notes_module = @import("notes.zig");
+const Notes = notes_module.Notes;
 const Allocator = std.mem.Allocator;
 const json = std.json;
-const builtin = std.builtin;
+const ArrayList = std.ArrayList;
 const testing = std.testing;
 const expect = testing.expect;
 
 pub const Person = struct {
     id: Id,
-    name: ?Name = null,
-    surname: ?Surname = null,
-    patronymic: ?Patronymic = null,
+    name: Name,
+    alternative_names: NameList,
+    surname: Surname,
+    alternative_surnames: SurnameList,
+    patronymic: Patronymic,
     sex: ?Sex = null,
     birth_date: ?Date = null,
     death_date: ?Date = null,
-    notes: ?Notes = null,
-    // events: Events,
+    notes: Notes,
+    ator: Allocator,
 
-    pub const Id = u64;
-    pub const FromJsonOptions = struct {
-        ator: ?Allocator = null,
-    };
+    // pub const default_id: Id = -1;
+    pub const Id = i64;
+    // pub const FromJsonOptions = struct {
+    //     ator: ?Allocator = null,
+    //     // person_default_id: ?i64 = null,
+    // };
+    pub fn init(id: Id, ator: Allocator) Person {
+        var person: Person = undefined;
+        person.id=id;
+        person.ator=ator;
+        inline for (@typeInfo(Initializer).Struct.fields) |field| {
+            switch (field.field_type) {
+                Id, Allocator, ?Sex, ?Date => {},
+                else => {
+                    @field(person, field.name) = field.field_type.init(ator);
+                },
+            }
+        }
+    }
+    pub fn deinit(this: *Person) void {
+        inline for (@typeInfo(Person).Struct.fields) |field| {
+            switch (field.field_type) {
+                Id, Allocator, ?Sex, ?Date => {},
+                else => {
+                    @field(this, field.name).deinit();
+                },
+            }
+        }
+    }
     pub const FromJsonError = error { bad_type, bad_field, };
-    pub fn initFromJson(
+    pub fn readFromJson(
         this: *Person,
         json_person: json.Value,
-        options: FromJsonOptions
+        // options: FromJsonOptions
     ) !void {
         switch (json_person) {
             json.Value.Object => |map| {
                 inline for (@typeInfo(Person).Struct.fields) |field| {
                     if (map.get(field.name)) |val| {
-                        if (field.field_type == Id) {
-                            switch (val) {
-                                json.Value.Integer => |int| {
-                                    this.id = @bitCast(u64, int);
-                                },
-                                else => { return FromJsonError.bad_field; },
-                            }
-                        } else {
-                            switch (val) {
-                                json.Value.Null => {
-                                    @field(this, field.name) = null;
-                                },
-                                else => {
-                                    if (@field(this, field.name) == null)
-                                        @field(this, field.name) = .{};
-                                    try @field(this, field.name).?.initFromJson(val, options);
-                                },
-                            }
+                        switch (field.field_type) {
+                            Id => {
+                                switch (val) {
+                                    json.Value.Integer => |int| {
+                                        this.id = int;
+                                    },
+                                    else => { return FromJsonError.bad_field; },
+                                }
+                            },
+                            ?Date, ?Sex => {
+                                switch (val) {
+                                    json.Value.Null => {
+                                        @field(this, field.name) = null,
+                                    },
+                                    else => {
+                                        if (@field(this, field.name) == null)
+                                            @field(this, field.name) = .{};
+                                        try @field(this, field.name).?.readFromJson(val);
+                                    },
+                                }
+                            },
+                            else => {
+                                try @field(this, field.name).readFromJson(val);
+                            },
                         }
                     }
                 }
@@ -55,49 +92,39 @@ pub const Person = struct {
             else => { return FromJsonError.bad_type; },
         }
     }
-    pub fn free(this: *Person, ator: Allocator) void {
-        inline for (@typeInfo(Person).Struct.fields) |field| {
-            if (field.field_type != Id) {
-                if (@field(this, field.name) != null) {
-                    @field(this, field.name).?.free(ator);
-                    @field(this, field.name) = null;
-                }
-            }
-        }
+    pub fn readFromJsonSourceStr(
+        this: *Person,
+        source_str: []const u8,
+        // comptime options: FromJsonOptions,
+    ) !void {
+        const ator = this.ator;
+        var parser = json.Parser.init(ator, false); // strings are copied in readFromJson
+        defer parser.deinit();
+        var tree = try parser.parse(source_str);
+        defer tree.deinit();
+        try this.readFromJson(tree.root, options);
     }
     pub const RenameOptions = struct {
-        new_ator: ?Allocator = null,
-        del_ator: ?Allocator = null,
+        copy: bool,
     };
+    pub const RenameError = error { allocators_mismatch, };
     pub fn rename(
         this: *Person,
-        new_name: Name,
-        options: RenameOptions
+        new_name_ptr: anytype,
+        options: enum { copy, move, },
     ) !void {
-        if (options.del_ator) |ator| {
-            if (this.name != null)
-                this.name.?.free(ator);
-        }
-        if (null == this.name)
-            this.name = .{};
-        if (options.new_ator) |ator| {
-            inline for (@typeInfo(Name).Struct.fields) |field| {
-                switch (field.field_type) {
-                    []const u8 => {
-                        @field(this.name.?, field.name) = try strCopyAlloc(@field(new_name, field.name), ator);
-                    },
-                    ?[]const u8 => {
-                        if (@field(new_name, field.name) != null) {
-                            @field(this.name.?, field.name) = try strCopyAlloc(@field(new_name, field.name).?, ator);
-                        }
-                    },
-                    else => { @compileLog("Person.rename() nonexhaustive switch on Name field types"); },
-                }
-            }
-        } else {
-            inline for (@typeInfo(Name).Struct.fields) |field| {
-                @field(this.name.?, field.name) = @field(new_name, field.name);
-            }
+        switch (options) {
+            .copy => {
+                var copy = try new_name_ptr.copy(this.name.ator);
+                defer copy.deinit();
+                this.name.swap(&copy);
+            },
+            .move => {
+                if (this.name.ator.vtable != new_name_ptr.ator.vtable)
+                    return RenameError.allocators_mismatch;
+                this.name.deinit();
+                this.name = new_name_ptr.move();
+            },
         }
     }
     pub fn setDate(this: *Person, date: Date, which: enum { birth, death, }) !void {
@@ -115,85 +142,110 @@ pub const Person = struct {
 
 pub const Name = struct {
     normal_form: []const u8 = "",
-    short_form: ?[]const u8 = null,
-    full_form: ?[]const u8 = null,
-    patronymic_male_form: ?[]const u8 = null,
-    patronymic_female_form: ?[]const u8 = null,
+    short_form: []const u8 = "",
+    full_form: []const u8 = "",
+    patronymic_male_form: []const u8 = "",
+    patronymic_female_form: []const u8 = "",
+    ator: Allocator,
 
     pub const FromJsonError = error { bad_type, bad_field, };
-    pub fn initFromJson(
+    pub fn init(ator: Allocator) Name {
+        return Name{.ator=ator};
+    }
+    pub fn deinit(this: *Name) void {
+        inline for (@typeInfo(Name).Struct.fields) |field| {
+            switch (field.field_type) {
+                []const u8 => {
+                    this.ator.free(@field(this, field.name));
+                },
+                else => {},
+            }
+        }
+    }
+    pub fn readFromJson(
         this: *Name,
         json_name: json.Value,
-        options: Person.FromJsonOptions,
+        // options: Person.FromJsonOptions,
     ) !void {
         switch (json_name) {
             json.Value.Object => |map| {
                 inline for (@typeInfo(Name).Struct.fields) |field| {
-                    if (map.get(field.name)) |val| {
-                        switch (val) {
-                            json.Value.String, json.Value.NumberString => |str| {
+                    switch (field.field_type) {
+                        []const u8 => {
+                            if (map.get(field.name)) |val| {
                                 var _field = &@field(this, field.name);
-                                switch (field.field_type) {
-                                    []const u8 => {
-                                        if (options.ator) |ator| {
-                                            _field.* = try strCopyAlloc(str, ator);
-                                        } else {
-                                            _field.* = str;
-                                        }
+                                switch (val) {
+                                    json.Value.String, json.Value.NumberString => |str| {
+                                        var slice = try strCopyAlloc(str, this.ator);
+                                        this.ator.free(_field.*);
+                                        _field.* = slice;
                                     },
-                                    ?[]const u8 => {
-                                        if (_field.* == null)
-                                            _field.* = "";
-                                        if (options.ator) |ator| {
-                                            _field.*.? = try strCopyAlloc(str, ator);
-                                        } else {
-                                            _field.*.? = str;
-                                        }
+                                    json.Value.Null => {
+                                        this.ator.free(_field.*);
+                                        _field.* = "";
                                     },
-                                    else => {
-                                        @compileLog("Name nonexhaustive field_type switch");
-                                    },
+                                    else => { return FromJsonError.bad_field; },
                                 }
-                            },
-                            else => { return FromJsonError.bad_field; },
-                        }
+                            }
+                        },
+                        Allocator => {}, // lmao
+                        else => { @compileError("Name nonexhaustive field_type switch"); }
                     }
                 }
             },
             json.Value.String => |str| {
-                if (options.ator) |ator| {
-                    this.normal_form = try strCopyAlloc(str, ator);
-                } else {
-                    this.normal_form = str;
+                var slice = try strCopyAlloc(str, this.ator);
+                this.ator.free(this.normal_form);
+                this.normal_form = slice;
+            },
+            else => { return FromJsonError.bad_type; },
+        }
+    }
+};
+
+pub const NameList = struct {
+    data: ArrayList(Name),
+    ator: Allocator,
+
+    pub const FromJsonError = error { bad_type, bad_item, };
+    pub fn init(ator: Allocator) void {
+        return NameList{.ator=ator, .data=ArrayList(Name).init(ator)};
+    }
+    pub fn deinit(this: *NameList) void {
+        for (this.data.items) |*name| {
+            name.deinit();
+        }
+        this.data.deinit();
+    }
+    pub fn initFromJson(
+        this: *NameList,
+        json_name_list: json.Value,
+        // options: Person.FromJsonOptions,
+    ) !void {
+        switch (json_name_list) {
+            json.Value.Array => |arr| {
+                for (arr.items) |item| {
+                    switch (item) {
+                        json.Value.Object, json.Value.String, json.Value.NumberString => {
+                            var name = Name.init(this.ator);
+                            errdefer name.deinit();
+                            try name.readFromJson(item, options);
+                            try this.data.append(this.ator, name);
+                        },
+                        else => { return FromJsonError.bad_item; },
+                    }
                 }
             },
             else => { return FromJsonError.bad_type; },
         }
     }
-    pub fn free(this: *Name, ator: Allocator) void {
-        inline for (@typeInfo(Name).Struct.fields) |field| {
-            switch (field.field_type) {
-                []const u8 => {
-                    if (@field(this, field.name).len != 0) {
-                        // is .len != 0 actually OK?
-                        ator.free(@field(this, field.name));
-                    }
-                },
-                ?[] const u8 => {
-                    if (@field(this, field.name) != null) {
-                        ator.free(@field(this, field.name).?);
-                        @field(this, field.name) = null;
-                    }
-                },
-                else => { @compileLog("Name.free() nonexhaustive field_type switch"); },
-            }
-        }
-    }
 };
+
+// TODO
 
 pub const Surname = struct {
     male_form: []const u8 = "",
-    female_form: ?[]const u8 = null,
+    female_form: []const u8 = "",
 
     pub const FromJsonError = error { bad_type, bad_field, };
     pub fn initFromJson(
@@ -226,7 +278,7 @@ pub const Surname = struct {
                                         }
                                     },
                                     else => {
-                                        @compileLog("Name nonexhaustive field_type switch");
+                                        @compileError("Name nonexhaustive field_type switch");
                                     },
                                 }
                             },
@@ -260,10 +312,14 @@ pub const Surname = struct {
                         @field(this, field.name) = null;
                     }
                 },
-                else => { @compileLog("Surname.free() nonexhaustive field_type switch"); }
+                else => { @compileError("Surname.free() nonexhaustive field_type switch"); }
             }
         }
     }
+};
+
+pub const SurnameList = struct {
+    // TODO
 };
 
 pub const Patronymic = struct {
@@ -337,138 +393,24 @@ pub const Sex = struct {
     }
 };
 
-pub const Date = struct {
-    day: ?u8 = null,
-    month: ?u8 = null,
-    year: ?i32 = null,
-
-    pub const ValidationError = error { invalid_day, invalid_month, invalid_year, };
-    pub const FromJsonError = error { bad_type, bad_field, bad_field_val, };
-    const month2daycount = [12]u8{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    pub fn validate(self: Date) ValidationError!void {
-        if (self.year) |year| {
-            if (year == 0) {
-                return ValidationError.invalid_year;
-            }
-        }
-        if (self.month) |month| {
-            if (month == 0 or month > 12) {
-                return ValidationError.invalid_month;
-            }
-            if (self.day) |day| {
-                if (month != 2) {
-                    if (day == 0 or day > Date.month2daycount[month-1]) {
-                        return ValidationError.invalid_day;
-                    }
-                } else {
-                    if (day == 0 or day > 29) {
-                        return ValidationError.invalid_day;
-                    }
-                }
-                if (self.year) |year| {
-                    if (month == 2 and (
-                            @rem(year, 400) == 0 or (
-                                @rem(year, 100) != 0 and @rem(year, 4) == 0
-                            )
-                        )) {
-                        // leap year
-                        if (day == 0 or day > 29) {
-                            return ValidationError.invalid_day;
-                        }
-                    } else {
-                        if (day == 0 or day > Date.month2daycount[month-1]) {
-                            return ValidationError.invalid_day;
-                        }
-                    }
-                }
-            }
-        } else {
-            if (self.day) |day| {
-                if (day == 0 or day > 31)
-                    return ValidationError.invalid_day;
-            }
-        }
-    }
-    pub fn dmy(d: u8, m: u8, y: i32) ValidationError!Date {
-        const res = Date{.day=d, .month=m, .year=y};
-        try res.validate();
-        return res;
-    }
-    pub fn initFromJson(
-        this: *Date,
-        json_date: json.Value,
-        options: Person.FromJsonOptions,
-    ) !void {
-        _ = options;
-        switch (json_date) {
-            json.Value.Object => |map| {
-                if (map.get("day")) |d| {
-                    switch (d) {
-                        json.Value.Integer => |int| {
-                            if (int > 0 and int <= ~@as(u8, 0)) {
-                                this.day = @intCast(@typeInfo(@TypeOf(this.day)).Optional.child, int);
-                            } else {
-                                return FromJsonError.bad_field_val;
-                            }
-                        },
-                        else => { return FromJsonError.bad_field; },
-                    }
-                }
-                if (map.get("month")) |m| {
-                    switch (m) {
-                        json.Value.Integer => |int| {
-                            if (int > 0 and int <= ~@as(u8, 0)) {
-                                this.month = @intCast(@typeInfo(@TypeOf(this.month)).Optional.child, int);
-                            } else {
-                                return FromJsonError.bad_field_val;
-                            }
-                        },
-                        else => { return FromJsonError.bad_field; },
-                    }
-                }
-                if (map.get("year")) |y| {
-                    switch (y) {
-                        json.Value.Integer => |int| {
-                            if (
-                                int >=  @bitReverse(i32, 1) and
-                                int <= ~@bitReverse(i32, 1)
-                            ) {
-                                this.year = @intCast(@typeInfo(@TypeOf(this.year)).Optional.child, int);
-                            }
-                        },
-                        else => { return FromJsonError.bad_field; },
-                    }
-                }
-                try this.validate();
-            },
-            else => { return FromJsonError.bad_type; },
-        }
-    }
-    pub fn free(this: *Date, ator: Allocator) void {
-        _ = this; _ = ator;
-    }
-};
-
-pub const Notes = Patronymic; // so far both Patronymic and Notes are wrapped []const u8
-
-const peter_full_source =
+const human_full_source =
     \\{
     \\  "id": 1,
-    \\  "name": {"normal_form": "Peter", "short_form": "Petya"},
-    \\  "surname": {"male_form": "Zakharov", "female_form": "Zakharova"},
-    \\  "patronymic": "Nikolaevich",
+    \\  "name": {"normal_form": "Human", "short_form": "Hum"},
+    \\  "surname": {"male_form": "Ivanov", "female_form": "Ivanova"},
+    \\  "patronymic": "Fathersson",
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
     \\  "notes": null
     \\}
 ;
-const peter_short_source =
+const human_short_source =
     \\{
     \\  "id": 2,
-    \\  "name": "Peter",
-    \\  "surname": "Zakharov",
-    \\  "patronymic": "Nikolaevich",
+    \\  "name": "Human",
+    \\  "surname": "Ivanov",
+    \\  "patronymic": "Fathersson",
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
@@ -488,295 +430,185 @@ const mysterious_source =
 
 test "name" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Peter", peter.name.?.normal_form));
-        try expect(strEqual("Petya", peter.name.?.short_form.?));
-        try expect(null == peter.name.?.full_form);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Human", human.name.?.normal_form));
+        try expect(strEqual("Hum", human.name.?.short_form.?));
+        try expect(null == human.name.?.full_form);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Peter", peter.name.?.normal_form));
-        try expect(null == peter.name.?.short_form);
-        try expect(null == peter.name.?.full_form);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Human", human.name.?.normal_form));
+        try expect(null == human.name.?.short_form);
+        try expect(null == human.name.?.full_form);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.name);
-        peter.name = .{.normal_form = try strCopyAlloc("", testing.allocator)};
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.name);
+        human.name = .{.normal_form = try strCopyAlloc("", testing.allocator)};
     }
 }
 
 test "surname" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Zakharov", peter.surname.?.male_form));
-        try expect(strEqual("Zakharova", peter.surname.?.female_form.?));
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Ivanov", human.surname.?.male_form));
+        try expect(strEqual("Ivanova", human.surname.?.female_form.?));
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Zakharov", peter.surname.?.male_form));
-        try expect(null == peter.surname.?.female_form);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Ivanov", human.surname.?.male_form));
+        try expect(null == human.surname.?.female_form);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.surname);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.surname);
     }
 }
 
 test "patronymic" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Nikolaevich", peter.patronymic.?.data));
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Fathersson", human.patronymic.?.data));
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(strEqual("Nikolaevich", peter.patronymic.?.data));
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(strEqual("Fathersson", human.patronymic.?.data));
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.patronymic);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.patronymic);
     }
 }
 
 test "sex" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(peter.sex.?.data == .male);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(human.sex.?.data == .male);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(peter.sex.?.data == .male);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(human.sex.?.data == .male);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.sex);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.sex);
     }
 }
 
 test "date" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(peter.birth_date.?.day.? == 3);
-        try expect(peter.birth_date.?.month.? == 2);
-        try expect(peter.birth_date.?.year.? == 2000);
-        try expect(peter.death_date == null);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(human.birth_date.?.day.? == 3);
+        try expect(human.birth_date.?.month.? == 2);
+        try expect(human.birth_date.?.year.? == 2000);
+        try expect(human.death_date == null);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(peter.birth_date.?.day.? == 3);
-        try expect(peter.birth_date.?.month.? == 2);
-        try expect(peter.birth_date.?.year.? == 2000);
-        try expect(peter.death_date == null);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(human.birth_date.?.day.? == 3);
+        try expect(human.birth_date.?.month.? == 2);
+        try expect(human.birth_date.?.year.? == 2000);
+        try expect(human.death_date == null);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.birth_date);
-        try expect(null == peter.death_date);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.birth_date);
+        try expect(null == human.death_date);
     }
 }
 
 test "notes" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.notes);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.notes);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.notes);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.notes);
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try expect(null == peter.notes);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try expect(null == human.notes);
     }
 }
 
 test "rename" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try peter.rename(
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try human.rename(
             Name{.normal_form="Osetr"},
             .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
         );
-        try expect(strEqual(peter.name.?.normal_form, "Osetr"));
+        try expect(strEqual(human.name.?.normal_form, "Osetr"));
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_short_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try peter.rename(
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_short_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try human.rename(
             Name{.normal_form="Osetr"},
             .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
         );
-        try expect(strEqual(peter.name.?.normal_form, "Osetr"));
+        try expect(strEqual(human.name.?.normal_form, "Osetr"));
     }
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(mysterious_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try peter.rename(
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(mysterious_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try human.rename(
             Name{.normal_form="Osetr"},
             .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
         );
-        try expect(strEqual(peter.name.?.normal_form, "Osetr"));
+        try expect(strEqual(human.name.?.normal_form, "Osetr"));
     }
 }
 
 test "set date" {
     {
-        var parser = json.Parser.init(testing.allocator, false);
-        defer parser.deinit();
-        var json_tree = try parser.parse(peter_full_source);
-        defer json_tree.deinit();
-        var json_peter = json_tree.root;
-        var peter = Person{ .id=0 };
-        try peter.initFromJson(json_peter, .{.ator=testing.allocator});
-        defer peter.free(testing.allocator);
-        try peter.setDate(Date{.day=2, .month=3, .year=2}, .birth);
-        try peter.setDate(Date{.day=1, .month=1, .year=-1}, .death);
-        try expect(peter.birth_date.?.day.? == 2);
+        var human = Person{ .id=0, };
+        try human.initFromJsonSourceStr(human_full_source, .{.ator=testing.allocator});
+        defer human.free(testing.allocator);
+        try human.setDate(Date{.day=2, .month=3, .year=2}, .birth);
+        try human.setDate(Date{.day=1, .month=1, .year=-1}, .death);
+        try expect(human.birth_date.?.day.? == 2);
     }
 }
 
