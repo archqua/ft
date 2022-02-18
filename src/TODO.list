@@ -1,0 +1,4 @@
+add out of memory tests w/ failing allocator
+log nonfatal errors
+log errors instead of throwing them
+date2str, str2date
