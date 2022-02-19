@@ -6,9 +6,9 @@ const dict_module = @import("dict.zig");
 const DictArrayUnmanaged = dict_module.DictArrayUnmanaged;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const logger = std.log.scoped(.ft);
-const debug = std.debug;
 
 
+// probably only StrMgmt.copy should ever be used
 pub const StrMgmt = enum {
     copy, move, weak,
 
@@ -127,8 +127,11 @@ pub const Notes = struct {
             json.Value.String, json.Value.NumberString => |*str| {
                 switch (options) {
                     .copy => {
-                        // AOCheck() ensures allocator
-                        this.text = try strCopyAlloc(str.*, allocator.?);
+                        if (allocator) |ator| {
+                            this.text = try strCopyAlloc(str.*, ator);
+                        } else {
+                            unreachable; // AOCheck()
+                        }
                     },
                     .move => {
                         this.text = str.*;

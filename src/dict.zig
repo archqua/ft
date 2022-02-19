@@ -65,6 +65,21 @@ return struct {
             try this.data.put(ator, key, val);
         }
     }
+    pub fn rawPutAssumeCapacity(
+        this: *Self,
+        key: K,
+        val: V,
+        ator: Allocator,
+        options: OperationOptions,
+    ) Error!void {
+        if (options.kopy) {
+            var copy = try strCopyAlloc(key, ator);
+            errdefer ator.free(copy);
+            this.data.putAssumeCapacity(copy, val);
+        } else {
+            this.data.putAssumeCapacity(key, val);
+        }
+    }
     /// on ks == .copy key is not copied iff entry already exists!!!
     pub fn put(
         this: *Self,
@@ -86,6 +101,28 @@ return struct {
             }
         } else {
             try this.rawPut(key, val, ator, options);
+        }
+    }
+    pub fn putAssumeCapacity(
+        this: *Self,
+        key: K,
+        val: V,
+        ator: Allocator,
+        options: OperationOptions,
+    ) Error!void {
+        if (this.getEntry(key)) |entry| {
+            if (options.kopy) {
+                // const key_copy = try strCopyAlloc(key, ator);
+                // ator.free(entry.key_ptr.*);
+                // entry.key_ptr.* = key_copy;
+                entry.value_ptr.* = val;
+            } else {
+                ator.free(entry.key_ptr.*);
+                entry.key_ptr.* = key;
+                entry.value_ptr.* = val;
+            }
+        } else {
+            try this.rawPutAssumeCapacity(key, val, ator, options);
         }
     }
     pub fn putNoClobber(
@@ -289,6 +326,20 @@ return struct {
             try this.data.put(key, val);
         }
     }
+    pub fn rawPutAssumeCapacity(
+        this: *Self,
+        key: K,
+        val: V,
+        options: OperationOptions,
+    ) Error!void {
+        if (options.kopy) {
+            var copy = try strCopyAlloc(key, this.ator);
+            errdefer this.ator.free(copy);
+            this.data.putAssumeCapacity(copy, val);
+        } else {
+            this.data.putAssumeCapacity(key, val);
+        }
+    }
     /// on ks == .copy key is not copied iff entry already exists!!!
     pub fn put(
         this: *Self,
@@ -309,6 +360,27 @@ return struct {
             }
         } else {
             try this.rawPut(key, val, options);
+        }
+    }
+    pub fn putAssumeCapacity(
+        this: *Self,
+        key: K,
+        val: V,
+        options: OperationOptions,
+    ) Error!void {
+        if (this.getEntry(key)) |entry| {
+            if (options.kopy) {
+                // const key_copy = try strCopyAlloc(key, this.ator);
+                // this.ator.free(entry.key_ptr.*);
+                // entry.key_ptr.* = key_copy;
+                entry.value_ptr.* = val;
+            } else {
+                this.ator.free(entry.key_ptr.*);
+                entry.key_ptr.* = key;
+                entry.value_ptr.* = val;
+            }
+        } else {
+            try this.rawPutAssumeCapacity(key, val, options);
         }
     }
     pub fn putNoClobber(

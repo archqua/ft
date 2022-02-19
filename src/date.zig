@@ -1,9 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
-const testing = std.testing;
-const expect = testing.expect;
-const expectError = testing.expectError;
+const logger = std.log.scoped(.ft);
 
 pub const Date = struct {
     /// comptime interfaces: [ readFromJson ]
@@ -17,21 +15,39 @@ pub const Date = struct {
     pub fn validate(self: Date) ValidationError!void {
         if (self.year) |year| {
             if (year == 0) {
+                logger.err("in Date.validate() invalid year {d}", .{year});
                 return ValidationError.invalid_year;
             }
         }
         if (self.month) |month| {
             if (month == 0 or month > 12) {
+                logger.err("in Date.validate() invalid month {d}", .{month});
                 return ValidationError.invalid_month;
             }
             if (self.day) |day| {
                 if (month != 2) {
                     if (day == 0 or day > Date.month2daycount[month-1]) {
+                        logger.err(
+                            "in Date.validate() invalid day {d} in month {d}"
+                            , .{day, month}
+                        );
                         return ValidationError.invalid_day;
                     }
-                } else {
+                } else { // year-independent Febuary check
                     if (day == 0 or day > 29) {
+                        logger.err(
+                            "in Date.validate() invalid day {d} in month 2 (year unknown)"
+                            , .{month}
+                        );
                         return ValidationError.invalid_day;
+                    }
+                    if (day == 29) {
+                        if (null == self.year) {
+                            logger.warn(
+                                "in Date.validate() suspicious day 29 in month 2 (year unknown)"
+                                , .{}
+                            );
+                        }
                     }
                 }
                 if (self.year) |year| {
@@ -42,19 +58,38 @@ pub const Date = struct {
                         )) {
                         // leap year
                         if (day == 0 or day > 29) {
+                            logger.err(
+                                "in Date.validate() invalid day {d} in month 2 (leap)"
+                                , .{day}
+                            );
                             return ValidationError.invalid_day;
                         }
                     } else {
                         if (day == 0 or day > Date.month2daycount[month-1]) {
+                            logger.err(
+                                "in Date.validate() invalid day {d}" ++
+                                " in month {d} in year {d}"
+                                , .{day, month, year}
+                            );
                             return ValidationError.invalid_day;
                         }
                     }
                 }
-            }
-        } else {
+            } // day check finished
+        } else { // month unknown
             if (self.day) |day| {
-                if (day == 0 or day > 31)
+                if (day == 0 or day > 31) {
+                    logger.err(
+                        "in Date.validate() invalid day {d} (month unknown)"
+                        , .{day}
+                    );
                     return ValidationError.invalid_day;
+                } else if (day > 28) {
+                    logger.warn(
+                        "in Date.validate() suspicious day {d} (month unknown)"
+                        , .{day}
+                    );
+                }
             }
         }
     }
@@ -75,10 +110,21 @@ pub const Date = struct {
                             if (int > 0 and int <= ~@as(u8, 0)) {
                                 this.day = @intCast(@typeInfo(@TypeOf(this.day)).Optional.child, int);
                             } else {
+                                logger.err(
+                                    "in Date.readFromJson() bad day {d}"
+                                    , .{int}
+                                );
                                 return FromJsonError.bad_field_val;
                             }
                         },
-                        else => { return FromJsonError.bad_field; },
+                        else => {
+                            logger.err(
+                                "in Date.readFromJson() j_date.get(\"day\") " ++
+                                " is not of type i64"
+                                , .{}
+                            );
+                            return FromJsonError.bad_field;
+                        },
                     }
                 }
                 if (map.get("month")) |m| {
@@ -87,10 +133,21 @@ pub const Date = struct {
                             if (int > 0 and int <= ~@as(u8, 0)) {
                                 this.month = @intCast(@typeInfo(@TypeOf(this.month)).Optional.child, int);
                             } else {
+                                logger.err(
+                                    "in Date.readFromJson() bad month {d}"
+                                    , .{int}
+                                );
                                 return FromJsonError.bad_field_val;
                             }
                         },
-                        else => { return FromJsonError.bad_field; },
+                        else => {
+                            logger.err(
+                                "in Date.readFromJson() j_date.get(\"month\") " ++
+                                " is not of type i64"
+                                , .{}
+                            );
+                            return FromJsonError.bad_field;
+                        },
                     }
                 }
                 if (map.get("year")) |y| {
@@ -103,15 +160,33 @@ pub const Date = struct {
                                 this.year = @intCast(@typeInfo(@TypeOf(this.year)).Optional.child, int);
                             }
                         },
-                        else => { return FromJsonError.bad_field; },
+                        else => {
+                            logger.err(
+                                "in Date.readFromJson() j_date.get(\"year\")" ++
+                                " is not of type i64"
+                                , .{}
+                            );
+                            return FromJsonError.bad_field;
+                        },
                     }
                 }
                 try this.validate();
             },
-            else => { return FromJsonError.bad_type; },
+            else => {
+                logger.err(
+                    "in Date.readFromJson() j_date is not of type json.ObjectMap"
+                    , .{}
+                );
+                return FromJsonError.bad_type;
+            },
         }
     }
 };
+
+
+const testing = std.testing;
+const expect = testing.expect;
+const expectError = testing.expectError;
 
 const christ_birthday_source = 
 \\{"day": 1, "month": 1, "year": 1}

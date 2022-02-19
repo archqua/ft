@@ -5,19 +5,32 @@ const notes_module = @import("notes.zig");
 const Notes = notes_module.Notes;
 const Allocator = std.mem.Allocator;
 const json = std.json;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const dict_module = @import("dict.zig");
+const DictArrayUnmanaged = dict_module.DictArrayUnmanaged;
 const logger = std.log.scoped(.ft);
 
 
+// probably only StrMgmt.copy should ever be used
+// StrMgmt.move seems ill
+// sex field's behaviour is not affected
 pub const StrMgmt = enum {
-    copy, move,
+    copy, move, weak,
     pub fn asText(comptime options: StrMgmt) switch (options) {
         .copy => @TypeOf("copy"),
         .move => @TypeOf("move"),
+        .weak => @TypeOf("weak"),
     } {
         return switch (options) {
             .copy => "copy",
             .move => "move",
+            .weak => "weak",
+        };
+    }
+    pub fn asEnumLiteral(comptime options: StrMgmt) @TypeOf(.enum_literal) {
+        return switch (options) {
+            .copy => .copy,
+            .move => .move,
+            .weak => .weak,
         };
     }
 };
@@ -27,31 +40,15 @@ pub const Person = struct {
     id: Id,
     name: Name = .{},
     alternative_names: NameList = .{},
-    // surname: Surname = .{},
-    // alternative_surnames: SurnameList = .{},
-    // patronymic: Patronymic = .{},
-    // sex: ?Sex = null,
+    surname: Surname = .{},
+    alternative_surnames: SurnameList = .{},
+    patronymic: Patronymic = .{},
+    sex: ?Sex = null,
     birth_date: ?Date = null,
     death_date: ?Date = null,
     notes: Notes = .{},
 
     pub const Id = i64;
-    // pub fn init(id: Id) Person {
-    //     logger.debug("Person.init() w/ id={d}", .{id});
-    //     var person: Person = undefined;
-    //     person.id=id;
-    //     inline for (@typeInfo(Person).Struct.fields) |field| {
-    //         switch (field.field_type) {
-    //             Id => {},
-    //             ?Sex, ?Date => {
-    //                 @field(person, field.name) = null;
-    //             },
-    //             else => {
-    //                 @field(person, field.name) = field.field_type.init(ator);
-    //             },
-    //         }
-    //     }
-    // }
     pub fn deinit(this: *Person, ator: Allocator) void {
         logger.debug("Person.deinit() w/ id={d}, w/ ator.vtable={*}", .{this.id, ator.vtable});
         inline for (@typeInfo(Person).Struct.fields) |field| {
@@ -67,26 +64,27 @@ pub const Person = struct {
     pub const FromJsonError = error { bad_type, bad_field, };
     pub fn readFromJson(
         this: *Person,
-        json_person: json.Value,
+        json_person: *json.Value,
         comptime allocator: ?Allocator,
         comptime options: StrMgmt,
     ) !void {
+        AOCheck(allocator, options);
         logger.debug("Person.readFromJson() w/ id={d}, options={s}", .{this.id, options.asText()});
-        switch (json_person) {
-            json.Value.Object => |map| {
+        switch (json_person.*) {
+            json.Value.Object => |*map| {
                 inline for (@typeInfo(Person).Struct.fields) |field| {
-                    if (map.get(field.name)) |val| {
+                    if (map.getPtr(field.name)) |val_ptr| {
                         switch (field.field_type) {
                             Id => {
-                                switch (val) {
+                                switch (val_ptr.*) {
                                     json.Value.Integer => |int| {
                                         this.id = int;
                                     },
                                     else => {
                                         logger.err(
-                                            \\in Person.readFromJson()
-                                            \\ j_person.get("id")
-                                            \\ is not of type i64
+                                            "in Person.readFromJson()" ++
+                                            " j_person.get(\"id\")" ++
+                                            " is not of type i64"
                                             , .{}
                                         );
                                         return FromJsonError.bad_field;
@@ -94,23 +92,26 @@ pub const Person = struct {
                                 }
                             },
                             ?Date, ?Sex => {
-                                switch (val) {
+                                switch (val_ptr.*) {
                                     json.Value.Null => {
                                         @field(this, field.name) = null;
                                     },
                                     else => {
-                                        if (@field(this, field.name) == null) {
+                                        if (null == @field(this, field.name)) {
                                             @field(this, field.name) = .{};
-                                            errdefer @field(this, fiels.name) = null;
-                                            try @field(this, field.name).?.readFromJson(val);
+                                            errdefer @field(this, field.name) = null;
+                                            try @field(this, field.name).?
+                                                    .readFromJson(val_ptr.*);
                                         } else {
-                                            try @field(this, field.name).?.readFromJson(val);
+                                            try @field(this, field.name).?
+                                                    .readFromJson(val_ptr.*);
                                         }
                                     },
                                 }
                             },
                             else => {
-                                try @field(this, field.name).readFromJson(val, allocator, options);
+                                try @field(this, field.name)
+                                        .readFromJson(val_ptr, allocator, options.asEnumLiteral());
                             },
                         }
                     }
@@ -119,7 +120,7 @@ pub const Person = struct {
             else => {
                 logger.err(
                     "in Person.readFromJson() j_person is not of type {s}",
-                    .{@typeName(json.ObjectMap)},
+                    .{"json.ObjectMap"},
                 );
                 return FromJsonError.bad_type;
             },
@@ -129,45 +130,46 @@ pub const Person = struct {
     pub fn readFromJsonSourceStr(
         this: *Person,
         source_str: []const u8,
-        ator: Allocator,
-        comptime allocator: ?Allocator,
+        comptime ator: Allocator,
         comptime options: StrMgmt,
     ) !void {
+        // TODO should only .copy be allowed???
         var parser = json.Parser.init(ator, false); // strings are copied in readFromJson
         defer parser.deinit();
         var tree = try parser.parse(source_str);
         defer tree.deinit();
-        try this.readFromJson(tree.root, allocator, options);
+        try this.readFromJson(&tree.root, ator, options);
     }
 
-    pub fn rename(
-        this: *Person,
-        new_name_ptr: anytype,
-        comptime allocator: ?Allocator,
-        comptime options: StrMgmt,
-    ) !void {
-        logger.debug("Person.rename(): {s} -> {s}", .{this.name.getSome(), new_name_ptr.getSome()});
-        switch (options) {
-            .copy => {
-                if (allocator) |ator| {
-                    var copy = try new_name_ptr.copy(ator);
-                    defer copy.deinit(ator);
-                    this.name.swap(&copy);
-                } else {
-                    this.name = new_name_ptr.*;
-                }
-            },
-            .move => {
-                if (allocator) |ator| {
-                    this.name.deinit(ator);
-                }
-                this.name = new_name_ptr.move();
-            },
-        }
-    }
+    // pub fn rename(
+    //     this: *Person,
+    //     new_name_ptr: anytype,
+    //     comptime allocator: ?Allocator,
+    //     comptime options: StrMgmt,
+    // ) !void {
+    //     AOCheck(allocator, options);
+    //     logger.debug("Person.rename(): {s} -> {s}", .{this.name.getSome(), new_name_ptr.getSome()});
+    //     switch (options) {
+    //         .copy => {
+    //             if (allocator) |ator| {
+    //                 var copy = try new_name_ptr.copy(ator);
+    //                 defer copy.deinit(ator);
+    //                 this.name.swap(&copy);
+    //             } else {
+    //                 unreachable; // AOCheck()
+    //             }
+    //         },
+    //         .move => {
+    //             this.name = new_name_ptr.move();
+    //         },
+    //         .weak => {
+    //             this.name = new_name_ptr.*;
+    //         },
+    //     }
+    // }
     pub fn setDate(this: *Person, date: Date, which: enum { birth, death, }) !void {
         logger.debug(
-            "Person.setDate() /w id={d} on occasion of {s}",
+            "Person.setDate() /w person.id={d} for event '{s}'",
             .{
                 this.id,
                 switch (which) {
@@ -213,23 +215,27 @@ pub const Name = struct {
     pub const FromJsonError = error { bad_type, bad_field, };
     pub fn readFromJson(
         this: *Name,
-        json_name: json.Value,
+        json_name: *json.Value,
         comptime allocator: ?Allocator,
         comptime options: StrMgmt,
     ) !void {
+        AOCheck(allocator, options);
         logger.debug("Name.readFromJson() w/ options={s}", .{options.asText()});
-        switch (json_name) {
-            json.Value.Object => |map| {
+        switch (json_name.*) {
+            json.Value.Object => |*map| {
                 switch (options) {
                     .copy => {
                         if (allocator) |ator| {
-                            try this.copyAllocFromJsonObj(map, ator);
+                            try this.deepCopyFromJsonObj(map.*, ator);
                         } else {
-                            try this.copyNoAllocFromJsonObj(map);
+                            unreachable; // AOCheck()
                         }
                     },
                     .move => {
-                        try this.moveFromJsonObj(map, allocator);
+                        try this.moveFromJsonObj(map);
+                    },
+                    .weak => {
+                        try this.weakCopyFromJsonObj(map.*);
                     },
                 }
             },
@@ -237,50 +243,43 @@ pub const Name = struct {
                 switch (options) {
                     .copy => {
                         if (allocator) |ator| {
-                            var slice = try strCopyAlloc(str.*, this.ator);
-                            this.deinit(ator);
-                            this = Name{};
-                            this.normal_form = slice;
+                            this.normal_form = try strCopyAlloc(str.*, ator);
                         } else {
-                            this = Name{};
-                            this.normal_form = str;
+                            unreachable; // AOCheck()
                         }
                     },
                     .move => {
-                        if (allocator) |ator| {
-                            this.deinit(ator);
-                        }
-                        this = Name{};
                         this.normal_form = str.*;
                         str.* = "";
+                    },
+                    .weak => {
+                        this.normal_form = str.*;
                     },
                 }
             },
             else => {
                 logger.err(
-                    \\in Name.readFromJson() j_name is neither {s} nor {s}
-                    , .{@typeName(json.ObjectMap), @typeName([]const u8)}
+                    "in Name.readFromJson() j_name is of neither type {s} nor {s}"
+                    , .{"json.ObjectMap", "json.String"}
                 );
                 return FromJsonError.bad_type;
             },
         }
     }
-    fn copyAllocFromJsonObj(this: *Name, map: json.ObjectMap, ator: Allocator) !void {
-        var name_copy = Name{};
-        errdefer name_copy.deinit(ator);
+    fn deepCopyFromJsonObj(this: *Name, map: json.ObjectMap, ator: Allocator) !void {
         inline for (@typeInfo(Name).Struct.fields) |field| {
-            if (map.get(field.name)) |*val| {
+            if (map.get(field.name)) |val| {
                 switch (field.field_type) {
                     []const u8 => {
-                        switch (val.*) {
-                            json.Value.String, json.Value.NumberString => |*str| {
-                                @field(name_copy, field.name) = try strCopyAlloc(str.*, ator);
+                        switch (val) {
+                            json.Value.String, json.Value.NumberString => |str| {
+                                @field(this, field.name) = try strCopyAlloc(str, ator);
                             },
                             else => {
                                 logger.err(
-                                    \\in Name.readFromJson() j_name.get("{s}")
-                                    \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    "in Name.readFromJson() j_name.get(\"{s}\")" ++
+                                    " is not of type {s}"
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -292,24 +291,21 @@ pub const Name = struct {
                 }
             }
         }
-        this.deinit(ator);
-        this.* = name_copy;
     }
-    fn copyNoAllocFromJsonObj(this: *Name, map: json.ObjectMap) !void {
-        var name_copy = Name{};
+    fn weakCopyFromJsonObj(this: *Name, map: json.ObjectMap) !void {
         inline for (@typeInfo(Name).Struct.fields) |field| {
             if (map.get(field.name)) |*val| {
                 switch (field.field_type) {
                     []const u8 => {
                         switch (val.*) {
                             json.Value.String, json.Value.NumberString => |str| {
-                                @field(name_copy, field.name) = str;
+                                @field(this, field.name) = str;
                             },
                             else => {
                                 logger.err(
-                                    \\in Name.readFromJson() j_name.get("{s}")
-                                    \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    "in Name.readFromJson() j_name.get(\"{s}\")" ++
+                                    " is not of type {s}"
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -321,39 +317,22 @@ pub const Name = struct {
                 }
             }
         }
-        this.* = name_copy;
     }
-    fn moveFromJsonObj(this: *Name, map: json.ObjectMap, allocator: ?Allocator) !void {
-        var name_copy = Name{};
-        errdefer {
-            // put back loop
-            inline for (@typeInfo(Name).Struct.fields) |field| {
-                if (map.getPtr(field.name)) |val_ptr| {
-                    switch (val_ptr.*) {
-                        json.String, json.Value.NumberString => |*str| {
-                            if (!strEqual(@field(name_copy, field.name), "")) {
-                                str.* = @field(name_copy, field.name);
-                            }
-                        },
-                        else => {}, // can't throw errors here
-                    }
-                }
-            }
-        }
+    fn moveFromJsonObj(this: *Name, map: *json.ObjectMap) !void {
         inline for (@typeInfo(Name).Struct.fields) |field| {
             if (map.getPtr(field.name)) |val_ptr| {
                 switch (field.field_type) {
                     []const u8 => {
                         switch (val_ptr.*) {
                             json.Value.String, json.Value.NumberString => |*str| {
-                                @field(name_copy, field.name) = str.*;
+                                @field(this, field.name) = str.*;
                                 str.* = "";
                             },
                             else => {
                                 logger.err(
                                     \\in Name.readFromJson() j_name.get("{s}")
                                     \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -365,10 +344,6 @@ pub const Name = struct {
                 }
             }
         }
-        if (allocator) |ator| {
-            this.deinit(ator);
-        }
-        this.* = name_copy;
     }
 
     pub fn getSome(self: Name) []const u8 {
@@ -386,66 +361,89 @@ pub const Name = struct {
 
 
 pub const NameList = struct {
-    data: ArrayListUnmanaged(Name) = .{},
+    data: DictArrayUnmanaged(Name) = .{},
 
     pub fn deinit(this: *NameList, ator: Allocator) void {
         logger.debug("NameList.deinit() w/ ator={*}", .{ator.vtable});
-        for (this.data.items) |name| {
-            name.deinit(ator);
+        var v_it = this.data.valueIterator();
+        while (v_it.next()) |val_ptr| {
+            val_ptr.deinit(ator);
         }
         this.data.deinit(ator);
     }
 
-    pub const FromJsonError = error { bad_type, bad_item, allocator_required, };
+    pub const FromJsonError = error { bad_type, allocator_required, };
     pub fn readFromJson(
         this: *NameList,
-        json_name_list: json.Value,
+        json_name_list: *json.Value,
         comptime allocator: ?Allocator,
         comptime options: StrMgmt,
     ) !void {
-        if (allocator) |ator| {
-            logger.debug("NameList.readFromJson() w/ options={s}", .{options.asText()});
-            var copy_list = NameList{};
-            errdefer copy_list.deinit(ator);
+        if (allocator) |ator| { // can't check allocator at comptime
+            logger.debug(
+                "NameList.readFromJson() w/ ator={*}, options={s}"
+                , .{ator.vtable, options.asText()}
+            );
             var last_read_name: ?Name = null;
-            switch (json_name_list) {
-                json.Value.Array => |arr| {
-                    copy_list.data.ensureTotalCapacity(arr.size);
-                    for (arr.items) |item| {
+            switch (json_name_list.*) {
+                json.Value.Object => |*obj| {
+                    try this.data.data.ensureTotalCapacity(ator, obj.count());
+                    errdefer this.data.data.shrinkAndFree(ator, this.data.data.count());
+                    var e_it = obj.iterator();
+                    while (e_it.next()) |entry| {
                         var name = Name{};
-                        errdefer name.deinit(ator);
-                        name.readFromJson(item) catch |err| {
+                        errdefer {
+                            switch (options) {
+                                .copy, .move => {
+                                    name.deinit(ator);
+                                },
+                                .weak => {},
+                            }
+                        }
+                        name.readFromJson(
+                            entry.value_ptr,
+                            ator,
+                            options,
+                        ) catch |err| {
                             if (last_read_name) |lrn| {
                                 logger.err(
-                                    \\in NameList.readFromJson()
-                                    \\ last successfully read name is {s}
-                                    \\ initial NameList remains unchanged
-                                    , .{lrn.normal_form}
+                                    "in NameList.readFromJson()" ++
+                                    " last successfully read name is {s}"
+                                    , .{lrn.getSome()}
                                 );
                             } else {
                                 logger.err(
-                                    \\in NameList.readFromJson()
-                                    \\ no name could be read
+                                    "in NameList.readFromJson()" ++
+                                    " no name could be read"
                                     , .{}
                                 );
                             }
                             return err;
                         };
                         last_read_name = name;
-                        try copy_list.data.append(ator, name);
+                        try this.data.putAssumeCapacity(
+                            entry.key_ptr.*,
+                            name,
+                            ator,
+                            .{.kopy = (options == .copy)},
+                        );
+                        switch (options) {
+                            .move => {
+                                entry.key_ptr.* = "";
+                            },
+                            .copy, .weak => {},
+                        }
                     }
                 },
                 else => {
                     logger.err(
-                        \\in NameList.readFromJson()
-                        \\ j_name_list is not of type {s}
-                        , .{@typeName(json.Array)}
+                        "in NameList.readFromJson()" ++
+                        " j_name_list is not of type {s}"
+                        , .{"json.ObjectMap"}
                     );
                     return FromJsonError.bad_type;
                 },
             }
-            this.deinit(ator);
-            this.* = copy_list;
         } else {
             logger.err("in NameList.readFromJson() allocator required", .{});
             return FromJsonError.allocator_required;
@@ -475,24 +473,31 @@ pub const Surname = struct {
     pub const FromJsonError = error { bad_type, bad_field, };
     pub fn readFromJson(
         this: *Surname,
-        json_surname: json.Value,
+        json_surname: *json.Value,
         comptime allocator: ?Allocator,
         comptime options: StrMgmt,
     ) !void {
+        AOCheck(allocator, options);
         logger.debug("Surname.readFromJson() w/ options={s}", .{options.asText()});
-        switch (json_surname) {
-            json.Value.Object => |map| {
-                var surname_copy = Surname{};
+        switch (json_surname.*) {
+            json.Value.Object => |*map| {
                 switch (options) {
                     .copy => {
                         if (allocator) |ator| {
-                            try this.copyAllocFromJsonObj(map, ator);
+                            try this.deepCopyFromJsonObj(map.*, ator);
                         } else {
-                            try this.copyNoAllocFromJsonObj(map);
+                            unreachable; // AOCheck()
                         }
                     },
                     .move => {
-                        try this.moveFromJsonObj(map, ator);
+                        try this.moveFromJsonObj(map);
+                    },
+                    .weak => {
+                        if (allocator) |ator| {
+                            try this.weakCopyFromJsonObj(map.*, ator);
+                        } else {
+                            unreachable; // AOCheck()
+                        }
                     },
                 }
             },
@@ -500,50 +505,43 @@ pub const Surname = struct {
                 switch (options) {
                     .copy => {
                         if (allocator) |ator| {
-                            var slice = try strCopyAlloc(str.*, this.ator);
-                            this.deinit(ator);
-                            this = Surname{};
-                            this.male_form = slice;
+                            this.male_form = try strCopyAlloc(str.*, ator);
                         } else {
-                            this = Surname{};
-                            this.male_form = str;
+                            unreachable; // AOCheck()
                         }
                     },
                     .move => {
-                        if (allocator) |ator| {
-                            this.deinit(ator);
-                        }
-                        this = Surname{};
                         this.male_form = str.*;
                         str.* = "";
+                    },
+                    .weak => {
+                        this.male_form = str.*;
                     },
                 }
             },
             else => {
                 logger.err(
-                    \\in Surname.readFromJson() j_surname is neither {s} nor {s}
-                    , .{@typeName(json.ObjectMap), @typeName([]const u8)}
+                    "in Surname.readFromJson() j_surname is of neither type {s} nor {s}"
+                    , .{"json.ObjectMap", "json.String"}
                 );
                 return FromJsonError.bad_type;
             },
         }
     }
-    fn copyAllocFromJsonObj(this: *Surname, map: json.ObjectMap, ator: Allocator) !void {
-        var surname_copy = Surname{};
-        errdefer surname_copy.deinit(ator);
+    fn deepCopyFromJsonObj(this: *Surname, map: json.ObjectMap, ator: Allocator) !void {
         inline for (@typeInfo(Surname).Struct.fields) |field| {
             if (map.get(field.name)) |*val| {
                 switch (field.field_type) {
                     []const u8 => {
                         switch (val.*) {
                             json.Value.String, json.Value.NumberString => |*str| {
-                                @field(surname_copy, field.name) = try strCopyAlloc(str.*, ator);
+                                @field(this, field.name) = try strCopyAlloc(str.*, ator);
                             },
                             else => {
                                 logger.err(
-                                    \\in Surname.readFromJson() j_surname.get("{s}")
-                                    \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    "in Surname.readFromJson() j_surname.get(\"{s}\")" ++
+                                    " is not of type {s}"
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -555,24 +553,21 @@ pub const Surname = struct {
                 }
             }
         }
-        this.deinit(ator);
-        this.* = surname_copy;
     }
-    fn copyNoAllocFromJsonObj(this: *Surname, map: json.ObjectMap) !void {
-        var surname_copy = Surname{};
+    fn weakCopyFromJsonObj(this: *Surname, map: json.ObjectMap) !void {
         inline for (@typeInfo(Surname).Struct.fields) |field| {
             if (map.get(field.name)) |*val| {
                 switch (field.field_type) {
                     []const u8 => {
                         switch (val.*) {
                             json.Value.String, json.Value.NumberString => |str| {
-                                @field(surname_copy, field.name) = str;
+                                @field(this, field.name) = str;
                             },
                             else => {
                                 logger.err(
-                                    \\in Surname.readFromJson() j_surname.get("{s}")
-                                    \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    "in Surname.readFromJson() j_surname.get(\"{s}\")" ++
+                                    " is not of type {s}"
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -584,39 +579,22 @@ pub const Surname = struct {
                 }
             }
         }
-        this.* = surname_copy;
     }
-    fn moveFromJsonObj(this: *Surname, map: json.ObjectMap, allocator: ?Allocator) !void {
-        var surname_copy = Surname{};
-        errdefer {
-            // put back loop
-            inline for (@typeInfo(Surname).Struct.fields) |field| {
-                if (map.getPtr(field.name)) |val_ptr| {
-                    switch (val_ptr.*) {
-                        json.String, json.Value.NumberString => |*str| {
-                            if (!strEqual(@field(surname_copy, field.name), "")) {
-                                str.* = @field(surname_copy, field.name);
-                            }
-                        },
-                        else => {}, // can't throw errors here
-                    }
-                }
-            }
-        }
+    fn moveFromJsonObj(this: *Surname, map: *json.ObjectMap) !void {
         inline for (@typeInfo(Surname).Struct.fields) |field| {
             if (map.getPtr(field.name)) |val_ptr| {
                 switch (field.field_type) {
                     []const u8 => {
                         switch (val_ptr.*) {
                             json.Value.String, json.Value.NumberString => |*str| {
-                                @field(surname_copy, field.name) = str.*;
+                                @field(this, field.name) = str.*;
                                 str.* = "";
                             },
                             else => {
                                 logger.err(
-                                    \\in Surname.readFromJson() j_surname.get("{s}")
-                                    \\ is not of type {s}
-                                    , .{field.name, @typeName([]const u8)}
+                                    "in Surname.readFromJson() j_surname.get(\"{s}\")" ++
+                                    " is not of type {s}"
+                                    , .{field.name, "json.String"}
                                 );
                                 return FromJsonError.bad_field;
                             },
@@ -628,10 +606,6 @@ pub const Surname = struct {
                 }
             }
         }
-        if (allocator) |ator| {
-            this.deinit(ator);
-        }
-        this.* = surname_copy;
     }
 
     pub fn getSome(self: Surname) []const u8 {
@@ -646,115 +620,231 @@ pub const Surname = struct {
 };
 
 
-// // TODO
 pub const SurnameList = struct {
-    data: ArrayListUnmanaged(Surname),
+    data: DictArrayUnmanaged(Surname) = .{},
     
     pub fn deinit(this: *SurnameList, ator: Allocator) void {
         logger.debug("SurnameList.deinit() w/ ator={*}", .{ator.vtable});
-        for (this.data.items) |*surname| {
-            surname.deinit(ator);
+        var v_it = this.data.valueIterator();
+        while (v_it.next()) |val_ptr| {
+            val_ptr.deinit(ator);
         }
         this.data.deinit(ator);
     }
 
-    pub const FromJsonError = error { bad_type, bad_field, };
+    pub const FromJsonError = error { bad_type, bad_field, allocator_required, };
     pub fn readFromJson(
         this: *SurnameList,
-        json_surname_list: json.Value,
-        allocator: ?Allocator,
-        options: StrMgmt,
+        json_surname_list: *json.Value,
+        comptime allocator: ?Allocator,
+        comptime options: StrMgmt,
     ) !void {
-        var copy_list = ArrayListUnmanaged(Surname).init(this.ator);
-        errdefer {
-            if (allocator) |ator|
-            for (copy_list.items) |*name| {
-                name.deinit();
+        if (allocator) |ator| {
+            logger.debug(
+                "Person.readFromJson() w/ ator={*}, options={s}"
+                , .{ator.vtable, options.asText()}
+            );
+            var last_read_surname: ?Surname = null;
+            switch (json_surname_list.*) {
+                json.Value.Object => |*obj| {
+                    try this.data.data.ensureTotalCapacity(ator, obj.count());
+                    errdefer this.data.data.shrinkAndFree(ator, this.data.count());
+                    var e_it = obj.iterator();
+                    while (e_it.next()) |entry| {
+                        var surname = Surname{};
+                        errdefer {
+                            switch (options) {
+                                .copy, .move => {
+                                    surname.deinit(ator);
+                                },
+                                .weak => {},
+                            }
+                        }
+                        surname.readFromJson(
+                            entry.value_ptr,
+                            ator,
+                            options,
+                        ) catch |err| {
+                            if (last_read_surname) |lrs| {
+                                logger.err(
+                                    "in SurnameList.readFromJson()" ++
+                                    " last successfully read surname is {s}"
+                                    , .{lrs.getSome()}
+                                );
+                            } else {
+                                logger.err(
+                                    "in SurnameList.readFromJson()" ++
+                                    " no surname could be read"
+                                    , .{}
+                                );
+                            }
+                            return err;
+                        };
+                        last_read_surname = surname;
+                        try this.data.putAssumeCapacity(
+                            entry.key_ptr.*,
+                            surname,
+                            ator,
+                            .{.kopy = (options == .copy)},
+                        );
+                        switch (options) {
+                            .move => {
+                                entry.key_ptr.* = "";
+                            },
+                            .copy, .weak => {},
+                        }
+                    }
+                },
+                else => {
+                    logger.err(
+                        "in SurnameList.fromJsonError() j_surname_list" ++
+                        " is not of type {s}"
+                        , .{"json.ObjectMap"}
+                    );
+                    return FromJsonError.bad_type;
+                },
             }
-            copy_list.deinit();
+        } else {
+            logger.err("in SurnameList.fromJsonError() allocator required", .{});
+            return FromJsonError.allocator_required;
         }
-        switch (json_surname_list) {
-            json.Array => |arr| {
-                for (arr.items) |item| {
-                    var surname = Surname.init(this.ator);
-                    errdefer surname.deinit();
-                    try surname.readFromJson(item);
-                    try copy_list.append(surname);
-                }
-            },
-            else => { return FromJsonError.bad_type; },
-        }
-        this.deinit();
-        this.data = copy_list;
     }
 };
 
 
-// pub const Patronymic = struct {
-//     data: []const u8 = "",
-//     ator: Allocator,
+pub const Patronymic = WrappedString("Patronymic");
+fn WrappedString(comptime type_name: []const u8) type {
+return struct {
+    data: []const u8 = "",
 
-//     pub fn init(ator: Allocator) Patronymic {
-//         return Patronymic{.ator=ator};
-//     }
-//     pub fn deinit(this: *Patronymic) void {
-//         this.ator.free(this.data);
-//     }
+    pub fn deinit(this: *@This(), ator: Allocator) void {
+        ator.free(this.data);
+    }
 
-//     pub const FromJsonError = error { bad_type, bad_field, };
-//     pub fn readFromJson(this: *Patronymic, json_patronymic: json.Value) !void {
-//         switch (json_patronymic) {
-//             json.Value.String, json.Value.NumberString => |str| {
-//                 var slice = try strCopyAlloc(str, this.ator);
-//                 this.ator.free(this.data);
-//                 this.data = slice;
-//             },
-//             else => { return FromJsonError.bad_type; },
-//         }
-//     }
-// };
+    pub const FromJsonError = error { bad_type, };
+    pub fn readFromJson(
+        this: *@This(),
+        json_patronymic: *json.Value,
+        comptime allocator: ?Allocator,
+        comptime options: StrMgmt,
+    ) !void {
+        AOCheck(allocator, options);
+        logger.debug("{s}.readFromJson() w/ options={s}", .{type_name, options.asText()});
+        switch (json_patronymic.*) {
+            json.Value.String, json.Value.NumberString => |*str| {
+                switch (options) {
+                    .copy => {
+                        if (allocator) |ator| {
+                            this.data = try strCopyAlloc(str.*, ator);
+                        } else {
+                            unreachable; // AOCheck()
+                        }
+                    },
+                    .move => {
+                        this.data = str.*;
+                        str.* = "";
+                    },
+                    .weak => {
+                        this.data = str.*;
+                    },
+                }
+            },
+            else => {
+                logger.err(
+                    "in {s}.readFromJson() j_{s} is not of type {s}"
+                    , .{type_name, "wrapped_string", "json.String"}
+                );
+                return FromJsonError.bad_type;
+            },
+        }
+    }
+};
+}
 
 
-// pub const Sex = struct {
-//     data: enum(u1) { male = 1, female = 0, } = .male,
+pub const Sex = struct {
+    data: UnderlyingEnum = .male,
+    const UnderlyingInt = u1;
+    pub const UnderlyingEnum = enum(UnderlyingInt) {
+        male = 1, female = 0,
+    };
 
-//     pub const FromJsonError = error { bad_type, bad_field, };
-//     pub fn readFromJson(this: *Sex, json_sex: json.Value) !void {
-//         switch (json_sex) {
-//             json.Value.String => |str| {
-//                 if (strEqual("male", str)) {
-//                     this.data = .male;
-//                 } else if (strEqual("female", str)) {
-//                     this.data = .female;
-//                 } else {
-//                     return FromJsonError.bad_field;
-//                 }
-//             },
-//             json.Value.Bool => |is_male| {
-//                 if (is_male) {
-//                     this.data = .male;
-//                 } else {
-//                     this.data = .female;
-//                 }
-//             },
-//             json.Value.Integer => |int| {
-//                 if (int == 1) {
-//                     this.data = .male;
-//                 } else if (int == 0) {
-//                     this.data = .female;
-//                 } else {
-//                     return FromJsonError.bad_field;
-//                 }
-//             },
-//             else => { return FromJsonError.bad_type; },
-//         }
-//     }
-// };
+    pub fn asChar(self: Sex) u8 {
+        return switch (self) {
+            .male => '1',
+            .female => '0',
+        };
+    }
+    pub fn asNum(self: Sex) UnderlyingInt {
+        return switch (self) {
+            .male => 1,
+            .female => 0,
+        };
+    }
+    pub fn asText(self: Sex) []const u8 {
+        return switch (self) {
+            .male => "male",
+            .female => "female",
+        };
+    }
+
+    pub const FromJsonError = error { bad_type, bad_field, };
+    pub fn readFromJson(this: *Sex, json_sex: json.Value) !void {
+        logger.debug("Sex.readFromJson()", .{});
+        switch (json_sex) {
+            json.Value.String => |str| {
+                if (strEqual("male", str)) {
+                    this.data = .male;
+                } else if (strEqual("female", str)) {
+                    this.data = .female;
+                } else {
+                    logger.err(
+                        "in Sex.readFromJson() j_sex_str" ++
+                        " is neither \"male\" nor \"female\""
+                        , .{}
+                    );
+                    return FromJsonError.bad_field;
+                }
+            },
+            json.Value.Bool => |is_male| {
+                if (is_male) {
+                    this.data = .male;
+                } else {
+                    this.data = .female;
+                }
+            },
+            json.Value.Integer => |int| {
+                if (int == 1) {
+                    this.data = .male;
+                } else if (int == 0) {
+                    this.data = .female;
+                } else {
+                    logger.err(
+                        "in Sex.readFromJson() j_sex_int" ++
+                        " is neither 1 nor 0"
+                        , .{}
+                    );
+                    return FromJsonError.bad_field;
+                }
+            },
+            else => {
+                logger.err(
+                    "in Sex.readFromJson() j_sex is of neither type {s}, {s} nor {s}"
+                    , .{"json.String", "json.Bool", "json.Integer"}
+                );
+                return FromJsonError.bad_type;
+            },
+        }
+    }
+};
 
 
 
 const testing = std.testing;
 const expect = testing.expect;
+const expectEqual = testing.expectEqual;
+const expectError = testing.expectError;
+const tator = testing.allocator;
 
 const human_full_source =
     \\{
@@ -765,7 +855,7 @@ const human_full_source =
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
-    \\  "notes": null
+    \\  "notes": ""
     \\}
 ;
 const human_short_source =
@@ -777,206 +867,346 @@ const human_short_source =
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
-    \\  "notes": null
+    \\  "notes": ""
     \\}
 ;
 const mysterious_source = 
     \\{
     \\  "id": 3,
-    \\  "name": null,
-    \\  "surname": null,
-    \\  "patronymic": null,
+    \\  "name": "",
+    \\  "surname": "",
+    \\  "patronymic": "",
     \\  "sex": null,
-    \\  "notes": null
+    \\  "notes": ""
     \\}
 ;
 
+fn testName(src: []const u8, expected_name: Name) !void {
+    var human = Person{.id = undefined};
+    defer human.deinit(tator);
+    try human.readFromJsonSourceStr(src, tator, .copy);
+    inline for (@typeInfo(Name).Struct.fields) |field| {
+        try expect(strEqual(
+                @field(human.name, field.name),
+                @field(expected_name, field.name),
+            ));
+    }
+}
 test "name" {
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_full_source);
-        defer human.free(testing.allocator);
-        try expect(strEqual("Human", human.name.?.normal_form));
-        try expect(strEqual("Hum", human.name.?.short_form.?));
-        try expect(null == human.name.?.full_form);
+    try testName(human_full_source, Name{.normal_form="Human", .short_form="Hum"});
+    try testName(human_short_source, Name{.normal_form="Human"});
+    try testName(mysterious_source, Name{});
+}
+
+fn testSurname(src: []const u8, expected_surname: Surname) !void {
+    var human = Person{.id = undefined};
+    defer human.deinit(tator);
+    try human.readFromJsonSourceStr(src, tator, .copy);
+    inline for (@typeInfo(Surname).Struct.fields) |field| {
+        try expect(strEqual(
+                @field(human.surname, field.name),
+                @field(expected_surname, field.name),
+            ));
     }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_short_source);
-        defer human.free(testing.allocator);
-        try expect(strEqual("Human", human.name.?.normal_form));
-        try expect(null == human.name.?.short_form);
-        try expect(null == human.name.?.full_form);
+}
+test "surname" {
+    try testSurname(human_full_source, Surname{.male_form="Ivanov", .female_form="Ivanova"});
+    try testSurname(human_short_source, Surname{.male_form="Ivanov"});
+    try testSurname(mysterious_source, Surname{});
+}
+
+fn testPatronymic(src: []const u8, expected_patronymic: Patronymic) !void {
+    var human = Person{.id=undefined};
+    defer human.deinit(tator);
+    try human.readFromJsonSourceStr(src, tator, .copy);
+    try expect(strEqual(expected_patronymic.data, human.patronymic.data));
+}
+test "patronymic" {
+    try testPatronymic(human_full_source, Patronymic{.data="Fathersson"});
+    try testPatronymic(human_short_source, Patronymic{.data="Fathersson"});
+    try testPatronymic(mysterious_source, Patronymic{.data=""});
+}
+
+fn testSex(src: []const u8, expected_sex: ?Sex) !void {
+    var human = Person{.id=undefined};
+    defer human.deinit(tator);
+    try human.readFromJsonSourceStr(src, tator, .copy);
+    if (expected_sex) |es| {
+        try expectEqual(es.data, human.sex.?.data);
+    } else {
+        try expectEqual(human.sex, null);
     }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(mysterious_source);
-        defer human.free(testing.allocator);
-        try expect(null == human.name);
-        human.name = .{.normal_form = try strCopyAlloc("", testing.allocator)};
+}
+test "sex" {
+    try testSex(human_full_source, Sex{.data=.male});
+    try testSex(human_short_source, Sex{.data=.male});
+    try testSex(mysterious_source, null);
+}
+
+fn testDate(src: []const u8, expected_date: ?Date, comptime which: @TypeOf(.enum_literal)) !void {
+    var human = Person{.id=undefined};
+    defer human.deinit(tator);
+    try human.readFromJsonSourceStr(src, tator, .copy);
+    switch (which) {
+        .birth => {
+            if (expected_date) |ed| {
+                inline for (@typeInfo(Date).Struct.fields) |field| {
+                    try expectEqual(
+                        @field(ed, field.name),
+                        @field(human.birth_date.?, field.name),
+                    );
+                }
+            } else {
+                try expectEqual(human.birth_date, null);
+            }
+        },
+        .death => {
+            if (expected_date) |ed| {
+                inline for (@typeInfo(Date).Struct.fields) |field| {
+                    try expectEqual(
+                        @field(ed, field.name),
+                        @field(human.death_date.?, field.name),
+                    );
+                }
+            } else {
+                try expectEqual(human.death_date, null);
+            }
+        },
+        else => {
+            @compileError("testDate() nonexhaustive switch on which date");
+        },
     }
 }
 
-// test "surname" {
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_full_source);
-//         defer human.free(testing.allocator);
-//         try expect(strEqual("Ivanov", human.surname.?.male_form));
-//         try expect(strEqual("Ivanova", human.surname.?.female_form.?));
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_short_source);
-//         defer human.free(testing.allocator);
-//         try expect(strEqual("Ivanov", human.surname.?.male_form));
-//         try expect(null == human.surname.?.female_form);
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(mysterious_source);
-//         defer human.free(testing.allocator);
-//         try expect(null == human.surname);
-//     }
-// }
-
-// test "patronymic" {
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_full_source);
-//         defer human.free(testing.allocator);
-//         try expect(strEqual("Fathersson", human.patronymic.?.data));
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_short_source);
-//         defer human.free(testing.allocator);
-//         try expect(strEqual("Fathersson", human.patronymic.?.data));
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(mysterious_source);
-//         defer human.free(testing.allocator);
-//         try expect(null == human.patronymic);
-//     }
-// }
-
-// test "sex" {
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_full_source);
-//         defer human.free(testing.allocator);
-//         try expect(human.sex.?.data == .male);
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(human_short_source);
-//         defer human.free(testing.allocator);
-//         try expect(human.sex.?.data == .male);
-//     }
-//     {
-//         var human = Person.init(0, testing.allocator);
-//         try human.readFromJsonSourceStr(mysterious_source);
-//         defer human.free(testing.allocator);
-//         try expect(null == human.sex);
-//     }
-// }
-
 test "date" {
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_full_source);
-        defer human.free(testing.allocator);
-        try expect(human.birth_date.?.day.? == 3);
-        try expect(human.birth_date.?.month.? == 2);
-        try expect(human.birth_date.?.year.? == 2000);
-        try expect(human.death_date == null);
-    }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_short_source);
-        defer human.free(testing.allocator);
-        try expect(human.birth_date.?.day.? == 3);
-        try expect(human.birth_date.?.month.? == 2);
-        try expect(human.birth_date.?.year.? == 2000);
-        try expect(human.death_date == null);
-    }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(mysterious_source);
-        defer human.free(testing.allocator);
-        try expect(null == human.birth_date);
-        try expect(null == human.death_date);
-    }
+    try testDate(human_full_source, Date{.day=3, .month=2, .year=2000}, .birth);
+    try testDate(human_full_source, null, .death);
+    try testDate(human_short_source, Date{.day=3, .month=2, .year=2000}, .birth);
+    try testDate(human_short_source, null, .death);
+    try testDate(mysterious_source, null, .birth);
+    try testDate(mysterious_source, null, .death);
 }
 
 test "notes" {
     {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_full_source);
-        defer human.free(testing.allocator);
-        try expect(null == human.notes);
+        var human = Person{.id=undefined};
+        defer human.deinit(tator);
+        try human.readFromJsonSourceStr(human_full_source, tator, .copy);
+        try expect(strEqual("", human.notes.text));
+        try expectEqual(@as(usize,0), human.notes.child_nodes.count());
     }
     {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_short_source);
-        defer human.free(testing.allocator);
-        try expect(null == human.notes);
+        var human = Person{.id=undefined};
+        defer human.deinit(tator);
+        try human.readFromJsonSourceStr(human_short_source, tator, .copy);
+        try expect(strEqual("", human.notes.text));
+        try expectEqual(@as(usize,0), human.notes.child_nodes.count());
     }
     {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(mysterious_source);
-        defer human.free(testing.allocator);
-        try expect(null == human.notes);
-    }
-}
-
-test "rename" {
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_full_source);
-        defer human.free(testing.allocator);
-        try human.rename(
-            Name{.normal_form="Osetr"},
-            .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
-        );
-        try expect(strEqual(human.name.?.normal_form, "Osetr"));
-    }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_short_source);
-        defer human.free(testing.allocator);
-        try human.rename(
-            Name{.normal_form="Osetr"},
-            .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
-        );
-        try expect(strEqual(human.name.?.normal_form, "Osetr"));
-    }
-    {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(mysterious_source);
-        defer human.free(testing.allocator);
-        try human.rename(
-            Name{.normal_form="Osetr"},
-            .{.new_ator=testing.allocator, .del_ator=testing.allocator,},
-        );
-        try expect(strEqual(human.name.?.normal_form, "Osetr"));
+        var human = Person{.id=undefined};
+        defer human.deinit(tator);
+        try human.readFromJsonSourceStr(mysterious_source, tator, .copy);
+        try expect(strEqual("", human.notes.text));
+        try expectEqual(@as(usize,0), human.notes.child_nodes.count());
     }
 }
 
 test "set date" {
     {
-        var human = Person.init(0, testing.allocator);
-        try human.readFromJsonSourceStr(human_full_source);
-        defer human.free(testing.allocator);
+        var human = Person{.id=undefined};
+        defer human.deinit(tator);
+        try human.readFromJsonSourceStr(mysterious_source, tator, .copy);
         try human.setDate(Date{.day=2, .month=3, .year=2}, .birth);
         try human.setDate(Date{.day=1, .month=1, .year=-1}, .death);
-        try expect(human.birth_date.?.day.? == 2);
+        try expectEqual(human.birth_date.?.day.?, 2);
+        try expectEqual(human.birth_date.?.month.?, 3);
+        try expectEqual(human.birth_date.?.year.?, 2);
+        try expectEqual(human.death_date.?.day.?, 1);
+        try expectEqual(human.death_date.?.month.?, 1);
+        try expectEqual(human.death_date.?.year.?, -1);
+    }
+}
+
+fn testError(src: []const u8, expected_error: anyerror) !void {
+    var human = Person{.id=undefined};
+    defer human.deinit(tator);
+    try expectError(expected_error, human.readFromJsonSourceStr(src, tator, .copy));
+}
+const bad_type_src_self =
+\\"asdf"
+;
+const bad_type_src_name =
+\\{
+\\  "name": 1
+\\}
+;
+const bad_type_src_surname =
+\\{
+\\  "surname": 1
+\\}
+;
+const bad_type_src_name_list =
+\\{
+\\  "alternative_names": 2
+\\}
+;
+const bad_type_src_surname_list =
+\\{
+\\  "alternative_surnames": ["a", "b", "c"]
+\\}
+;
+const bad_type_src_date =
+\\{
+\\  "birth_date": "today"
+\\}
+;
+const bad_type_src_sex =
+\\{
+\\  "sex": [1, 2, 3]
+\\}
+;
+const bad_type_src_patronymic =
+\\{
+\\  "patronymic": 2
+\\}
+;
+const bad_type_src_notes =
+\\{
+\\  "notes": 2
+\\}
+;
+const bad_type_sources = [_][]const u8{
+    bad_type_src_self,
+    bad_type_src_name,
+    bad_type_src_name_list,
+    bad_type_src_surname,
+    bad_type_src_surname_list,
+    bad_type_src_date,
+    bad_type_src_sex,
+    bad_type_src_patronymic,
+    bad_type_src_notes,
+};
+const bad_field_src_id =
+\\{
+\\  "id": "asdf"
+\\}
+;
+const bad_field_src_name =
+\\{
+\\  "name": {
+\\    "normal_form": 1
+\\  }
+\\}
+;
+const bad_field_src_name_list =
+\\{
+\\  "alternative_names": {
+\\    "name": {
+\\      "normal_form": 1
+\\    }
+\\  }
+\\}
+;
+const bad_field_src_surname =
+\\{
+\\  "surname": {
+\\    "male_form": 1
+\\  }
+\\}
+;
+const bad_field_src_surname_list =
+\\{
+\\  "alternative_surnames": {
+\\    "surname": {
+\\      "male_form": 1
+\\    }
+\\  }
+\\}
+;
+const bad_field_src_date =
+\\{
+\\  "birth_date": {
+\\    "day": "today"
+\\  }
+\\}
+;
+const bad_field_src_sex =
+\\{
+\\  "sex": 2
+\\}
+;
+const bad_field_src_notes =
+\\{
+\\  "notes": {
+\\    "text": "text",
+\\    "child_nodes": 2
+\\  }
+\\}
+;
+const bad_field_sources = [_][]const u8{
+    bad_field_src_id,
+    bad_field_src_name,
+    bad_field_src_name_list,
+    bad_field_src_surname,
+    bad_field_src_surname_list,
+    bad_field_src_date,
+    bad_field_src_sex,
+    bad_field_src_notes,
+};
+fn testAllocatorRequired(src: []const u8) !void {
+    var parser = json.Parser.init(tator, false); // strings are copied in readFromJson
+    defer parser.deinit();
+    var tree = try parser.parse(src);
+    defer tree.deinit();
+    var hum = Person{.id=undefined};
+    defer hum.deinit(tator);
+    try expectError(anyerror.allocator_required, hum.readFromJson(&tree.root, null, .weak));
+}
+const allocator_required_src_name_list =
+\\{
+\\  "alternative_names": {}
+\\}
+;
+const allocator_required_src_surname_list =
+\\{
+\\  "alternative_surnames": {}
+\\}
+;
+const allocator_required_src_notes =
+\\{
+\\  "notes": {
+\\    "child_nodes": {}
+\\  }
+\\}
+;
+const allocator_required_sources = [_][]const u8{
+    allocator_required_src_name_list,
+    allocator_required_src_surname_list,
+    allocator_required_src_notes,
+};
+test "errors" {
+    for (bad_type_sources) |bt_src| {
+        try testError(bt_src, anyerror.bad_type);
+    }
+    for (bad_field_sources) |bf_src| {
+        try testError(bf_src, anyerror.bad_field);
+    }
+    for (allocator_required_sources) |ar_src| {
+        try testAllocatorRequired(ar_src);
     }
 }
 
 
 
+fn AOCheck(comptime allocator: ?Allocator, comptime options: StrMgmt) void {
+    switch (options) {
+        .copy => {
+            if (null == allocator)
+                @compileError("Person: can't copy w\\o allocator");
+        },
+        .move, .weak => {},
+    }
+}
 fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {
     var res = try ator.alloc(u8, from.len);
     for (from) |c, i| {
@@ -984,7 +1214,6 @@ fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {
     }
     return res;
 }
-
 fn strEqual(lhs: []const u8, rhs: []const u8) bool {
     if (lhs.len != rhs.len)
         return false;
