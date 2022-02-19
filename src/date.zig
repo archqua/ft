@@ -117,6 +117,9 @@ pub const Date = struct {
                                 return FromJsonError.bad_field_val;
                             }
                         },
+                        json.Value.Null => {
+                            this.day = null;
+                        },
                         else => {
                             logger.err(
                                 "in Date.readFromJson() j_date.get(\"day\") " ++
@@ -140,6 +143,9 @@ pub const Date = struct {
                                 return FromJsonError.bad_field_val;
                             }
                         },
+                        json.Value.Null => {
+                            this.month = null;
+                        },
                         else => {
                             logger.err(
                                 "in Date.readFromJson() j_date.get(\"month\") " ++
@@ -159,6 +165,9 @@ pub const Date = struct {
                             ) {
                                 this.year = @intCast(@typeInfo(@TypeOf(this.year)).Optional.child, int);
                             }
+                        },
+                        json.Value.Null => {
+                            this.year = null;
                         },
                         else => {
                             logger.err(
