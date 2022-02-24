@@ -173,6 +173,19 @@ pub const Family = struct {
         defer tree.deinit();
         try this.readFromJson(tree.root, ator);
     }
+
+    pub const ParentEnum = enum {
+        father, mother,
+        pub fn asText(comptime self: ParentEnum) switch (self) {
+            .father => @TypeOf("father"),
+            .mother => @TypeOf("mother"),
+        } {
+            return switch (self) {
+                .father => "father",
+                .mother => "mother",
+            };
+        }
+    };
 };
 
 

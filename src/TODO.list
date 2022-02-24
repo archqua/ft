@@ -1,4 +1,4 @@
 add out of memory tests w/ failing allocator
 date2str, str2date
 put back when error in Surname or Name readFromJson w/ .move
-rework Preson.rename()
+rework Person.rename()

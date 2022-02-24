@@ -47,17 +47,13 @@ pub const Person = struct {
     birth_date: ?Date = null,
     death_date: ?Date = null,
     notes: Notes = .{},
-    // these are by-blood
-    father_id: ?Id = null,
-    mother_id: ?Id = null,
-    mitochondrial_mother_id: ?Id = null,
 
     pub const Id = i64;
     pub fn deinit(this: *Person, ator: Allocator) void {
         logger.debug("Person.deinit() w/ id={d}, w/ ator.vtable={*}", .{this.id, ator.vtable});
         inline for (@typeInfo(Person).Struct.fields) |field| {
             switch (field.field_type) {
-                Id, ?Id, ?Sex, ?Date => {},
+                Id, ?Sex, ?Date => {},
                 else => {
                     @field(this, field.name).deinit(ator);
                 },
@@ -90,25 +86,6 @@ pub const Person = struct {
                                             " j_person.get(\"id\")" ++
                                             " is not of type {s}"
                                             , .{"json.Integer"}
-                                        );
-                                        return FromJsonError.bad_field;
-                                    },
-                                }
-                            },
-                            ?Id => {
-                                switch (val_ptr.*) {
-                                    json.Value.Integer => |int| {
-                                        @field(this, field.name) = int;
-                                    },
-                                    json.Value.Null => {
-                                        @field(this, field.name) = null;
-                                    },
-                                    else => {
-                                        logger.err(
-                                            "in Person.readFromJson()" ++
-                                            " j_person.get(\"{s}\")" ++
-                                            " is of neither type {s} not {s}"
-                                            , .{field.name, "json.Integer", "json.Null"}
                                         );
                                         return FromJsonError.bad_field;
                                     },
@@ -878,10 +855,7 @@ const human_full_source =
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
-    \\  "notes": "",
-    \\  "father_id": 123,
-    \\  "mother_id": 321,
-    \\  "mitochondrial_mother_id": 321
+    \\  "notes": ""
     \\}
 ;
 const human_short_source =
@@ -893,9 +867,7 @@ const human_short_source =
     \\  "sex": "male",
     \\  "birth_date": {"day": 3, "month": 2, "year": 2000},
     \\  "death_date": null,
-    \\  "notes": "",
-    \\  "father_id": 123,
-    \\  "mother_id": 321
+    \\  "notes": ""
     \\}
 ;
 const mysterious_source = 
@@ -905,9 +877,7 @@ const mysterious_source =
     \\  "surname": "",
     \\  "patronymic": "",
     \\  "sex": null,
-    \\  "notes": "",
-    \\  "father_id": null,
-    \\  "mother_id": null
+    \\  "notes": ""
     \\}
 ;
 
@@ -1039,29 +1009,6 @@ test "notes" {
         try expect(strEqual("", human.notes.text));
         try expectEqual(@as(usize,0), human.notes.child_nodes.count());
     }
-}
-
-fn testParentId(src: []const u8, expected_parent_id: ?Person.Id, who: enum {father, mother, mit_mother}) !void {
-    var hum = Person{.id=undefined};
-    defer hum.deinit(tator);
-    try hum.readFromJsonSourceStr(src, tator, .copy);
-    const parent_id = switch (who) {
-        .father => hum.father_id,
-        .mother => hum.mother_id,
-        .mit_mother => hum.mitochondrial_mother_id,
-    };
-    try expectEqual(expected_parent_id, parent_id);
-}
-test "parent id" {
-    try testParentId(human_full_source, 123, .father);
-    try testParentId(human_full_source, 321, .mother);
-    try testParentId(human_full_source, 321, .mit_mother);
-    try testParentId(human_short_source, 123, .father);
-    try testParentId(human_short_source, 321, .mother);
-    try testParentId(human_short_source, null, .mit_mother);
-    try testParentId(mysterious_source, null, .father);
-    try testParentId(mysterious_source, null, .mother);
-    try testParentId(mysterious_source, null, .mit_mother);
 }
 
 test "set date" {
@@ -1196,21 +1143,6 @@ const bad_field_src_notes =
 \\  }
 \\}
 ;
-const bad_field_src_father_id =
-\\{
-\\  "father_id": "daddy"
-\\}
-;
-const bad_field_src_mother_id =
-\\{
-\\  "mother_id": "mommy"
-\\}
-;
-const bad_field_src_mit_mother_id =
-\\{
-\\  "mitochondrial_mother_id": "meat mommy"
-\\}
-;
 const bad_field_sources = [_][]const u8{
     bad_field_src_id,
     bad_field_src_name,
@@ -1220,9 +1152,6 @@ const bad_field_sources = [_][]const u8{
     bad_field_src_date,
     bad_field_src_sex,
     bad_field_src_notes,
-    bad_field_src_father_id,
-    bad_field_src_mother_id,
-    bad_field_src_mit_mother_id,
 };
 fn testAllocatorRequired(src: []const u8) !void {
     var parser = json.Parser.init(tator, false); // strings are copied in readFromJson
