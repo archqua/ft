@@ -2,10 +2,12 @@ const std = @import("std");
 const json = std.json;
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const dict_module = @import("dict.zig");
 const DictArrayUnmanaged = dict_module.DictArrayUnmanaged;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const logger = std.log.scoped(.ft);
+const util = @import("util.zig");
 
 
 // probably only StrMgmt.copy should ever be used
@@ -40,7 +42,7 @@ pub const Notes = struct {
         bad_type,           bad_field,
         allocator_required, max_depth_reached,
     };
-    pub const Error = FromJsonError||DictArrayUnmanaged(Notes).Error;
+    pub const Error = util.ToJsonError||FromJsonError||DictArrayUnmanaged(Notes).Error;
     pub fn deinit(this: *Notes, ator: Allocator) void {
         logger.debug("Notes.deinit() w/ depth={d}, ator={*}", .{this.depth, ator.vtable});
         ator.free(this.text);
@@ -61,7 +63,7 @@ pub const Notes = struct {
     pub fn readFromJson(
         this: *Notes,
         json_notes: *json.Value,
-        comptime allocator: ?Allocator,
+        allocator: anytype,
         comptime options: StrMgmt,
     ) Error!void {
         AOCheck(allocator, options);
@@ -91,7 +93,7 @@ pub const Notes = struct {
                                 }
                             },
                             DictArrayUnmanaged(Notes) => {
-                                if (allocator) |ator| {
+                                if (allocatorCapture(allocator)) |ator| {
                                     switch (val.*) {
                                         json.Value.Object => |*nmap| {
                                             this.child_nodes = try dictArrayFromJsonObj(
@@ -127,7 +129,7 @@ pub const Notes = struct {
             json.Value.String, json.Value.NumberString => |*str| {
                 switch (options) {
                     .copy => {
-                        if (allocator) |ator| {
+                        if (allocatorCapture(allocator)) |ator| {
                             this.text = try strCopyAlloc(str.*, ator);
                         } else {
                             unreachable; // AOCheck()
@@ -154,7 +156,7 @@ pub const Notes = struct {
     }
     fn dictArrayFromJsonObj(
         obj: *json.ObjectMap,
-        comptime ator: Allocator,
+        ator: Allocator,
         comptime options: StrMgmt,
         depth: u8,
     ) Error!DictArrayUnmanaged(Notes) {
@@ -203,6 +205,38 @@ pub const Notes = struct {
         }
         return res;
     }
+    // pub fn toJson(self: Notes, ator: Allocator) util.ToJsonError!json.Value {
+    //     // TODO use max_depth
+    //     var arena = ArenaAllocator.init(ator);
+    //     const aator = arena.allocator();
+    //     var res = json.ObjectMap.init(aator);
+    //     errdefer arena.deinit();
+    //     inline for (@typeInfo(Notes).Struct.fields) |field| {
+    //         switch (field.field_type) {
+    //             DictArrayUnmanaged(Notes) => {
+    //                 var j_subnotes = json.ObjectMap.init(aator);
+    //                 var iter = self.child_nodes.iterator();
+    //                 while (iter.next()) |entry| {
+    //                     try j_subnotes.put(
+    //                         entry.key_ptr.*,
+    //                         try entry.value_ptr.toJson(ator),
+    //                     ); // ator, not aator here
+    //                 }
+    //                 try res.put(
+    //                     field.name,
+    //                     @unionInit(json.Value, "Object", j_subnotes),
+    //                 );
+    //             },
+    //             else => {
+    //                 try res.put(
+    //                     field.name,
+    //                     try util.toJson(@field(self, field.name), ator, .{}),
+    //                 );
+    //             },
+    //         }
+    //     }
+    //     return @unionInit(json.Value, "Object", res);
+    // }
 
     pub fn clone(self: Notes, ator: Allocator) !Notes {
         logger.debug("Notes.clone() w/ ator={*}", .{ator.vtable});
@@ -233,11 +267,21 @@ pub const Notes = struct {
         this.* = Notes{};
         return res;
     }
-    fn AOCheck(comptime allocator: ?Allocator, comptime options: StrMgmt) void {
+    fn AOCheck(allocator: anytype, comptime options: StrMgmt) void {
         switch (options) {
-            .copy => if (null == allocator)
-                @compileError("Notes: can't .copy strings w\\o allocator, did you mean .weak?"),
+            .copy => switch (@TypeOf(allocator)) {
+                Allocator => {},
+                @TypeOf(null) => @compileError("Notes: can't .copy strings w\\o allocator, did you mean .weak?"),
+                else => @compileError("Notes: nonexhaustive switch in AOCheck()"),
+            },
             .move, .weak => {},
+        }
+    }
+    fn allocatorCapture(allocator: anytype) ?Allocator {
+        switch (@TypeOf(allocator)) {
+            Allocator => return allocator,
+            @TypeOf(null) => return null,
+            else => @compileError("Notes: nonexhaustive switch in allocatorCapture()"),
         }
     }
 };
@@ -365,6 +409,19 @@ test "errors" {
     try testError(Notes.FromJsonError.bad_type, bad_type_1_source);
     try testError(Notes.FromJsonError.bad_field, bad_field_0_source);
     try testError(Notes.FromJsonError.bad_field, bad_field_1_source);
+}
+
+test "to json" {
+    var parser = json.Parser.init(tator, false);
+    defer parser.deinit();
+    var tree = try parser.parse(nested_2_source);
+    defer tree.deinit();
+    var notes = Notes{};
+    try notes.readFromJson(&tree.root, tator, .copy);
+    defer notes.deinit(tator);
+    var j_notes = try util.toJson(notes, tator, .{});
+    defer j_notes.Object.deinit();
+    _ = j_notes;
 }
 
 fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {

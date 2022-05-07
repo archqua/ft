@@ -2,3 +2,6 @@ add out of memory tests w/ failing allocator
 date2str, str2date
 put back when error in Surname or Name readFromJson w/ .move
 rework Person.rename()
+make json code more generic via util module
+give Notes toJson()
+give NameList, SurnameList and other dynamic structures toJson()

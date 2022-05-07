@@ -32,6 +32,13 @@ pub const Family = struct {
     pub fn addChild(this: *Family, child_id: Person.Id, ator: Allocator) !void {
         try this.children_ids.append(ator, child_id);
     }
+    pub fn hasChild(self: Family, candidate: Person.Id) bool {
+        for (self.children_ids.items) |child_id| {
+            if (child_id == candidate)
+                return true;
+        }
+        return false;
+    }
     pub fn readFromJson(
         this: *Family,
         json_family: json.Value,
@@ -172,6 +179,21 @@ pub const Family = struct {
         var tree = try parser.parse(source_str);
         defer tree.deinit();
         try this.readFromJson(tree.root, ator);
+    }
+    pub fn toJson(self: Family, ator: Allocator) json.ObjectMap {
+        var res = json.ObjectMap.init(ator);
+        errdefer res.deinit();
+        inline for (@typeInfo(Family).Struct.fields) |field| {
+            res.put(
+                field.name,
+                if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+                    @field(self, field.name).toJson();
+                } else {
+                    @field(self, field.name);
+                }
+            );
+        }
+        return res;
     }
 
     pub const ParentEnum = enum {
@@ -358,10 +380,14 @@ test "add child" {
         var daughter = Person{.id=undefined};
         try daughter.readFromJsonSourceStr(daughter_source, tator, .copy);
         defer daughter.deinit(tator);
+        try expect(!family.hasChild(3));
+        try expect(!family.hasChild(4));
         try family.addChild(son.id, tator);
         try family.addChild(daughter.id, tator);
         try expectEqual(family.children_ids.items[0], 3);
         try expectEqual(family.children_ids.items[1], 4);
+        try expect(family.hasChild(3));
+        try expect(family.hasChild(4));
     }
 }
 

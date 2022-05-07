@@ -116,8 +116,123 @@ pub const Person = struct {
         defer tree.deinit();
         try this.readFromJson(&tree.root, ator, options);
     }
-    pub fn toJson(self: Person, ator: Allocator) !json.Value {
-        return util.toJson(self, ator, .{.allow_overload=false});
+    pub fn toJson(self: Person, ator: Allocator) json.ObjectMap {
+        var res = json.ObjectMap.init(ator);
+        errdefer res.deinit();
+        // const fields = @typeInfo(Person).Struct.fields;
+        // comptime var tags = [1]util.JsonTag{util.JsonTag.Null} ** fields.len;
+        // comptime {
+        //     inline for (fields) |field, i| {
+        //         tags[i] = util.type2jtag(field.field_type);
+        //     }
+        // }
+        // inline for (@typeInfo(Person).Struct.fields) |field, i| {
+        inline for (@typeInfo(Person).Struct.fields) |field| {
+            var j_value: json.Value = undefined;
+            switch (@typeInfo(field.field_type)) {
+                .Struct => {
+                    j_value = @field(self, field.name).toJson(ator);
+                },
+                .Optional => |optional| {
+                    if (@field(self, field.name)) |field_value| {
+                        switch (@typeInfo(optional.child)) {
+                            .Struct => {
+                                j_value = @field(self, field.name).toJson(ator);
+                            },
+                            else => {
+                                j_value = @unionInit(
+                                    json.Value,
+                                    // tags[i].asText(),
+                                    util.type2jtag(field.field_type).asText(),
+                                    field_value,
+                                );
+                            },
+                        }
+                    } else {
+                        j_value = @unionInit(
+                            json.Value,
+                            "Null",
+                            {},
+                        );
+                    }
+                },
+                else => {
+                    j_value = @unionInit(
+                        json.Value,
+                        // tags[i].asText(),
+                        util.type2jtag(field.field_type).asText(),
+                        @field(self, field.name)
+                    );
+                },
+            }
+            res.put(
+                field.name,
+                j_value,
+            );
+            // comptime {
+            //     inline for (@typeInfo(@TypeOf(field)).Struct.fields) |sf| {
+            //         @compileLog(if (sf.is_comptime) "true\n" else "false\n");
+            //     }
+            //     inline for (@typeInfo(std.builtin.TypeInfo.Struct).Struct.fields) |ssf| {
+            //         @compileLog(if (ssf.is_comptime) "true\n" else "false\n");
+            //     }
+            // }
+            // res.put(
+            //     field.name,
+            //     switch (@typeInfo(field.field_type)) {
+            //         std.builtin.TypeInfo.Struct => @field(self, field.name).toJson(ator),
+            //         else => blk: {
+            //             const jtag = switch (field.field_type) {
+            //                 void => util.JsonTag.Null,
+            //                 bool => util.JsonTag.Bool,
+            //                 i64 => util.JsonTag.Integer,
+            //                 f64 => util.JsonTag.Float,
+            //                 []const u8 => util.JsonTag.String,
+            //                 json.Array => util.JsonTag.Array,
+            //                 json.ObjectMap => util.JsonTag.Object,
+            //                 else => @compileError("util: can't infer json tag from type given"),
+            //             };
+            //             break :blk @unionInit(
+            //                 json.Value,
+            //                 jtag.asText(),
+            //                 @field(self, field.name),
+            //             );
+            //         },
+            //     },
+            // );
+            // const j_value = switch (@typeInfo(field.field_type)) {
+            //     .Struct => blk: {
+            //         if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+            //             break :blk @field(self, field.name).toJson(ator);
+            //         } else {
+            //             break :blk @field(self, field.name);
+            //         }
+            //     },
+            //     else => blk: {
+            //         // comptime var jtag: util.JsonTag = util.JsonTag.Null;
+            //         // comptime {
+            //         //     jtag = switch (field.field_type) {
+            //         //         void => util.JsonTag.Null,
+            //         //         bool => util.JsonTag.Bool,
+            //         //         i64 => util.JsonTag.Integer,
+            //         //         f64 => util.JsonTag.Float,
+            //         //         []const u8 => util.JsonTag.String,
+            //         //         json.Array => util.JsonTag.Array,
+            //         //         json.ObjectMap => util.JsonTag.Object,
+            //         //         else => @compileError("util: can't infer json tag from type given"),
+            //         //     };
+            //         // }
+            //         break :blk @unionInit(
+            //             json.Value,
+            //             // jtag.asText(),  // util.type2jtag(field.field_type).asText(),
+            //             util.type2jtag(field.field_type).asText(),
+            //             @field(self, field.name),
+            //         );
+            //     },
+            // };
+            // res.put(field.name, j_value);
+        }
+        return res;
     }
 
     // pub fn rename(
@@ -750,19 +865,19 @@ pub const Sex = struct {
     };
 
     pub fn asChar(self: Sex) u8 {
-        return switch (self.data) {
+        return switch (self) {
             .male => '1',
             .female => '0',
         };
     }
     pub fn asNum(self: Sex) UnderlyingInt {
-        return switch (self.data) {
+        return switch (self) {
             .male => 1,
             .female => 0,
         };
     }
     pub fn asText(self: Sex) []const u8 {
-        return switch (self.data) {
+        return switch (self) {
             .male => "male",
             .female => "female",
         };
@@ -815,9 +930,6 @@ pub const Sex = struct {
                 return FromJsonError.bad_type;
             },
         }
-    }
-    pub fn toJson(self: Sex, ator: Allocator) !json.Value {
-        return util.toJson(self.asText(), ator, .{});
     }
 };
 
@@ -1198,13 +1310,10 @@ test "errors" {
 }
 
 test "to json" {
-    std.debug.print("to json test\n", .{});
     var person = Person{.id = undefined};
     defer person.deinit(tator);
     try person.readFromJsonSourceStr(human_full_source , tator, .copy);
-    std.debug.print("trying toJson\n", .{});
-    var j_person = try person.toJson(tator);
-    std.debug.print("toJson\n", .{});
+    var j_person = json.Value{.Object = person.toJson(tator)};
     defer j_person.Object.deinit();
     var nosrep = Person{.id = undefined};
     defer nosrep.deinit(tator);

@@ -2,6 +2,7 @@ const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const logger = std.log.scoped(.ft);
+const util = @import("util.zig");
 
 pub const Date = struct {
     /// comptime interfaces: [ readFromJson ]
@@ -190,6 +191,39 @@ pub const Date = struct {
             },
         }
     }
+    // pub fn toJson(self: Date, ator: Allocator) json.ObjectMap {
+    //     var res = json.ObjectMap.init(ator);
+    //     errdefer res.deinit();
+    //     inline for (@typeInfo(Date).Struct.fields) |field| {
+    //         res.put(
+    //             field.name,
+    //             blk: {
+    //                 switch (@typeInfo(field.field_type)) {
+    //                     .Struct => {
+    //                         if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+    //                             break :blk @field(self, field.name).toJson(ator);
+    //                         } else {
+    //                             break :blk @field(self, field.name);
+    //                         }
+    //                     },
+    //                     else => {
+    //                         break :blk @unionInit(
+    //                                        json.Value,
+    //                                        util.type2jtag(field.field_type).asText(),
+    //                                        @field(self, field.name)
+    //                                     );
+    //                     },
+    //                 }
+    //             },
+    //             // if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+    //             //     @field(self, field.name).toJson(ator);
+    //             // } else {
+    //             //     @field(self, field.name);
+    //             // }
+    //         );
+    //     }
+    //     return res;
+    // }
 };
 
 
@@ -255,4 +289,11 @@ test "errors" {
         defer tree.deinit();
         try expectError(Date.FromJsonError.bad_field_val, date.readFromJson(tree.root));
     }
+}
+
+test "to json" {
+    var date = Date{.day = 1};
+    var j_date = try util.toJson(date, testing.allocator, .{});
+    defer j_date.Object.deinit();
+    _ = j_date;
 }

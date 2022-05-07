@@ -25,12 +25,12 @@ const FamilyTree = struct {
     pub const family_unregistered = @as(Family.Id, -1);
     pub const person_invalidated = @as(Person.Id, -2);
     pub const family_invalidated = @as(Family.Id, -2);
-    pub const max_pid = switch (@typeInfo(Person.Id).Int.Signedness) {
+    pub const max_pid = switch (@typeInfo(Person.Id).Int.signedness) {
         .signed => ~@bitReverse(Person.Id, 1),
         .unsigned => @compileError("wrong understanding of Person.Id as signed int"),
     };
     pub const min_pid = @as(Person.Id, 0);
-    pub const max_fid = switch (@typeInfo(Family.Id).Int.Signedness) {
+    pub const max_fid = switch (@typeInfo(Family.Id).Int.signedness) {
         .signed => ~@bitReverse(Family.Id, 1),
         .unsigned => @compileError("wrong understanding of Family.Id as signed int"),
     };
@@ -541,6 +541,212 @@ const FamilyTree = struct {
         try this.assignPeopleTheirFamilies();
         try this.assignPeopleTheirChildren();
     }
+
+    pub const FromJsonError = error { bad_type, bad_field, };
+    pub fn readFromJson(
+        this: *FamilyTree,
+        json_tree: *json.Value,
+        comptime options: JsonReadOptions,
+    ) !void {
+        options.AOCheck();
+        logger.debug("FamilyTree.readFromJson() w/ options={s}", .{options.str_mgmt.asText()});
+        switch (json_tree.*) {
+            json.Value.Object => |jtmap| {
+                inline for (.{.people, .families}) |pfe| {
+                    const pfs = switch (pfe) {
+                        .people => "people",
+                        .families => "families",
+                        else => @compileError("nonexhaustive switch on people-families enum"),
+                    };
+                    if (jtmap.get(pfs)) |*payload| {
+                        try this.readPayloadFromJson(payload, pfe, options);
+                    }
+                }
+            },
+            else => {
+                logger.err(
+                    "in FamilyTree.readFromJson() j_tree is not of type {s}"
+                    , .{"json.ObjectMap"},
+                );
+                return FromJsonError.bad_type;
+            },
+        }
+        try this.buildConnections();
+    }
+    pub fn readPayloadFromJson(
+        this: *FamilyTree,
+        json_payload: *json.Value,
+        comptime which: @TypeOf(.enum_literal),//enum {people, families},
+        comptime options: JsonReadOptions,
+    ) !void {
+        options.AOCheck();
+        switch (json_payload.*) {
+            json.Value.Array => |parr| {
+                switch (which) {
+                    .people => {
+                        for (parr.items) |*jperson| {
+                            var person = Person{.id=person_invalidated};
+                            if (options.use_ator) {
+                                try person.readFromJson(
+                                    jperson,
+                                    this.ator,
+                                    options.str_mgmt.asEnumLiteral(),
+                                );
+                            } else {
+                                try person.readFromJson(
+                                    jperson,
+                                    null,
+                                    options.str_mgmt.asEnumLiteral(),
+                                );
+                            }
+                            errdefer {
+                                if (options.use_ator)
+                                    switch (options.str_mgmt) {
+                                        .weak => {},
+                                        else => {
+                                            person.deinit(this.ator);
+                                        },
+                                    };
+                            }
+                            const pk = try this.registerPerson(&person);
+                            logger.debug("FamilyTree: registering person with id {}", .{person.id});
+                            var pinfo_ptr = this.getPersonInfoPtr(pk).?;
+                            switch (jperson.*) {
+                                json.Value.Object => |jpmap| {
+                                    inline for (.{.father, .mother, .mit_mother}) |fme| {
+                                        const fmks = switch (fme) {
+                                            .father => "father_key",
+                                            .mother => "mother_key",
+                                            .mit_mother => "mit_mother_key",
+                                            else => @compileError("nonexhaustive switch on father-(mit)mother enum"),
+                                        };
+                                        if (jpmap.get(fmks)) |jfm| {
+                                            switch (jfm) {
+                                                json.Value.Integer => |jfmi| {
+                                                    if (jfmi > max_pid or jfmi < min_pid) {
+                                                        logger.err(
+                                                            "in FamilyTree.readPayloadFromJson()" ++
+                                                            " j_parent_key is out of bounds"
+                                                            , .{},
+                                                        );
+                                                        return FromJsonError.bad_field;
+                                                    }
+                                                    @field(pinfo_ptr.fo_connections, fmks) = @intCast(PersonKey, jfmi);
+                                                },
+                                                else => {
+                                                    logger.err(
+                                                        "in FamilyTree.readPayloadFromJson()" ++
+                                                        " j_parent_key is not of type {s}"
+                                                        , .{"json.Int"}
+                                                    );
+                                                    return FromJsonError.bad_type;
+                                                },
+                                            }
+                                        }
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    },
+                    .families => {
+                        for (parr.items) |jfamily| {
+                            var family = Family{.id=family_invalidated};
+                            try family.readFromJson(
+                                jfamily,
+                                if (options.use_ator) this.ator else null,
+                            );
+                            errdefer {
+                                if (options.use_ator)
+                                    switch (options.str_mgmt) {
+                                        .weak => {},
+                                        else => {
+                                            family.deinit(this.ator);
+                                        },
+                                    };
+                            }
+                            _ = try this.registerFamily(&family);
+                        }
+                    },
+                    else => {
+                        @compileError("bruh");
+                    },
+                }
+            },
+            else => {
+                logger.err(
+                    "in FamilyTree.readPeopleFromJson() j_people is not of type {s}"
+                    , .{"json.ObjectMap"},
+                );
+                return FromJsonError.bad_type;
+            }
+        }
+    }
+    pub fn readFromJsonSourceStr(
+        this: *FamilyTree,
+        source_str: []const u8,
+        comptime options: JsonReadOptions,
+    ) !void {
+        // TODO should only .copy be allowed???
+        var parser = json.Parser.init(this.ator, false); // strings are copied in readFromJson
+        defer parser.deinit();
+        var tree = try parser.parse(source_str);
+        defer tree.deinit();
+        try this.readFromJson(&tree.root, options);
+    }
+    pub fn toJson(self: FamilyTree, ator: Allocator) json.ObjectMap {
+        var res = json.ObjectMap.init(ator);
+        errdefer res.deinit();
+        inline for (@typeInfo(FamilyTree).Struct.fields) |field| {
+            res.put(
+                field.name,
+                if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+                    @field(self, field.name).toJson();
+                } else {
+                    @field(self, field.name);
+                }
+            );
+        }
+        return res;
+    }
+
+    pub const JsonReadOptions = struct {
+        str_mgmt: StrMgmt = .copy,
+        use_ator: bool = true,
+        fn AOCheck(comptime self: JsonReadOptions) void {
+            switch (self.str_mgmt) {
+                .copy => {
+                    if (!self.use_ator)
+                        @compileError("FamilyTree: can't copy w\\o allocator");
+                },
+                .move, .weak => {},
+            }
+        }
+    };
+};
+
+
+
+pub const StrMgmt = enum {
+    copy, move, weak,
+    pub fn asText(comptime options: StrMgmt) switch (options) {
+        .copy => @TypeOf("copy"),
+        .move => @TypeOf("move"),
+        .weak => @TypeOf("weak"),
+    } {
+        return switch (options) {
+            .copy => "copy",
+            .move => "move",
+            .weak => "weak",
+        };
+    }
+    pub fn asEnumLiteral(comptime options: StrMgmt) @TypeOf(.enum_literal) {
+        return switch (options) {
+            .copy => .copy,
+            .move => .move,
+            .weak => .weak,
+        };
+    }
 };
 
 
@@ -760,3 +966,49 @@ test "build connections" {
     _ = fip.fo_connections.families.pop();
     try tree.buildConnections();
 }
+
+const healthy_family_src =
+    \\{
+    \\  "people": [
+    \\    {"id": 1, "name": "father"},
+    \\    {"id": 2, "name": "son", "father_key": 1},
+    \\    {"id": 3, "name": "adopted"},
+    \\    {"id": 4, "name": "bastard", "father_key": 1}
+    \\  ],
+    \\  "families": [
+    \\    {"id": 1, "father_id": 1, "children_ids": [2, 3]}
+    \\  ]
+    \\}
+;
+
+test "read from json" {
+    var ft = FamilyTree.init(tator, .{.seed=0});
+    defer ft.deinit();
+    try ft.readFromJsonSourceStr(healthy_family_src, .{});
+    const father_info = ft.getPersonInfoPtr(1).?;
+    const son_info = ft.getPersonInfoPtr(2).?;
+    const adopted_info = ft.getPersonInfoPtr(3).?;
+    const bastard_info = ft.getPersonInfoPtr(4).?;
+
+    try expectEqual(father_info.person.id, 1);
+    try expectEqual(son_info.person.id, 2);
+    try expectEqual(adopted_info.person.id, 3);
+    try expectEqual(bastard_info.person.id, 4);
+
+    try expectEqual(son_info.fo_connections.father_key, 1);
+    try expectEqual(adopted_info.fo_connections.father_key, null);
+    try expectEqual(bastard_info.fo_connections.father_key, 1);
+
+    try expect(father_info.fo_connections.hasChild(2));
+    try expect(!father_info.fo_connections.hasChild(3));
+    try expect(father_info.fo_connections.hasChild(4));
+
+    const family = ft.getFamilyPtr(1).?;
+    try expectEqual(family.father_id, 1);
+    try expect(family.hasChild(2));
+    try expect(family.hasChild(3));
+    try expect(!family.hasChild(4));
+}
+
+
+

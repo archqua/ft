@@ -4,8 +4,11 @@ const StringArrayHashMap = std.StringArrayHashMap;
 const StringHashMapUnmanaged = std.StringHashMapUnmanaged;
 const StringArrayHashMapUnmanaged = std.StringArrayHashMapUnmanaged;
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const json = std.json;
+const util = @import("util.zig");
 
 pub fn SlicePtrIterator(comptime T: type) type {
 return struct {
@@ -277,6 +280,9 @@ return struct {
     pub fn count(self: Self) Size {
         return self.data.count();
     }
+    pub fn toJson(self: Self, ator: Allocator) !json.Value {
+        return dictLikeToJson(self, ator);
+    }
 };
 }
 }.val_t;
@@ -535,9 +541,33 @@ return struct {
     pub fn count(self: Self) Size {
         return self.data.count();
     }
+    pub fn toJson(self: Self, ator: Allocator) !json.Value {
+        return dictLikeToJson(self, ator);
+    }
 };
 }
 }.val_t;
+}
+
+pub fn dictLikeToJson(self: anytype, ator: Allocator) !json.Value {
+    var res = json.ObjectMap.init(ator);
+    errdefer res.deinit();
+    var viter = self.valueIterator();
+    var kiter = self.keyIterator();
+    while (viter.next()) |val| {
+        if (kiter.next()) |key| {
+            var value = try util.toJson(val.*, ator, .{});
+            errdefer switch(value) {
+                .Object => |*obj| obj.deinit(),
+                .Array => |*arr| arr.deinit(),
+                else => {},
+            };
+            try res.put(key.*, value);
+        } else {
+            break;
+        }
+    }
+    return @unionInit(json.Value, "Object", res);
 }
 
 pub const DictUnmanaged = WarpedUnmanaged(StringHashMapUnmanaged);
@@ -551,6 +581,7 @@ pub const DictArray = Warped(StringArrayHashMap);
 
 const testing = std.testing;
 const expect = testing.expect;
+const expectEqual = testing.expectEqual;
 const expectError = testing.expectError;
 const tator = testing.allocator;
 
@@ -725,6 +756,44 @@ test "dict array" {
     var c = try d.clown();
     defer c.deinit();
     try expect(c.get("osetr").? == 4);
+}
+
+test "to json" {
+    {
+        var dict = DictUnmanaged(i64){};
+        defer dict.deinit(tator);
+        try dict.put("key1", 1, tator, .{.kopy=true});
+        var j_dict_ = try dict.toJson(tator);
+        var j_dict = j_dict_.Object;
+        defer j_dict.deinit();
+        try expectEqual(dict.get("key1").?, j_dict.get("key1").?.Integer);
+    }
+    {
+        var dict = Dict(i64).init(tator);
+        defer dict.deinit();
+        try dict.put("key1", 1, .{.kopy=true});
+        var j_dict_ = try dict.toJson(tator);
+        var j_dict = j_dict_.Object;
+        defer j_dict.deinit();
+        try expectEqual(dict.get("key1").?, j_dict.get("key1").?.Integer);
+    }
+
+    {
+        var ddict = Dict(Dict(i64)).init(tator);
+        defer ddict.deinit();
+        var dict = Dict(i64).init(tator);
+        defer dict.deinit();
+        try dict.put("key", 1, .{.kopy=true});
+        try ddict.put("kkey", dict, .{.kopy=true});
+        var j_ddict_ = try ddict.toJson(tator);
+        var j_ddict = j_ddict_.Object;
+        defer j_ddict.deinit();
+        defer j_ddict.get("kkey").?.Object.deinit();
+        try expectEqual(
+            ddict.get("kkey").?.get("key"),
+            j_ddict.get("kkey").?.Object.get("key").?.Integer,
+        );
+    }
 }
 
 fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {
