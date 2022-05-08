@@ -2,11 +2,13 @@ const std = @import("std");
 const person_module = @import("person.zig");
 const family_module = @import("family.zig");
 const json = std.json;
+const util = @import("util.zig");
 
 
 const Person = person_module.Person;
 const Family = family_module.Family;
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Prng = std.rand.DefaultPrng;
 const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
@@ -52,7 +54,7 @@ const FamilyTree = struct {
         fo_connections: FOConnections = .{},
 
         pub const FOConnections = struct {
-            // by blood
+            // blood
             father_key: ?PersonKey = null,
             mother_key: ?PersonKey = null,
             mit_mother_key: ?PersonKey = null,
@@ -122,7 +124,7 @@ const FamilyTree = struct {
             this.fo_connections.deinit(ator);
             this.person.deinit(ator);
         }
-    };
+    }; // FOConnections
 
     pub const Error = error {
         person_not_unregistered,   family_not_unregistered,
@@ -361,7 +363,7 @@ const FamilyTree = struct {
                 }
             }
         }
-        for (family.children_ids.items) |child_id| {
+        for (family.children_ids.data.items) |child_id| {
             if (child_id < 0) {
                 logger.err(
                     "in FamilyTree.danglingPeopleFamilyShallowVisitor()" ++
@@ -474,7 +476,7 @@ const FamilyTree = struct {
                 );
             }
         }
-        for (family.children_ids.items) |child_id| {
+        for (family.children_ids.data.items) |child_id| {
             const person_info_ptr = tree.getPersonInfoPtr(@intCast(PersonKey, child_id)).?;
             const fo_connections_ptr = &person_info_ptr.fo_connections;
             _ = try fo_connections_ptr.addFamily(
@@ -633,6 +635,9 @@ const FamilyTree = struct {
                                                     }
                                                     @field(pinfo_ptr.fo_connections, fmks) = @intCast(PersonKey, jfmi);
                                                 },
+                                                json.Value.Null => {
+                                                    @field(pinfo_ptr.fo_connections, fmks) = null;
+                                                },
                                                 else => {
                                                     logger.err(
                                                         "in FamilyTree.readPayloadFromJson()" ++
@@ -694,21 +699,6 @@ const FamilyTree = struct {
         defer tree.deinit();
         try this.readFromJson(&tree.root, options);
     }
-    pub fn toJson(self: FamilyTree, ator: Allocator) json.ObjectMap {
-        var res = json.ObjectMap.init(ator);
-        errdefer res.deinit();
-        inline for (@typeInfo(FamilyTree).Struct.fields) |field| {
-            res.put(
-                field.name,
-                if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
-                    @field(self, field.name).toJson();
-                } else {
-                    @field(self, field.name);
-                }
-            );
-        }
-        return res;
-    }
 
     pub const JsonReadOptions = struct {
         str_mgmt: StrMgmt = .copy,
@@ -723,7 +713,103 @@ const FamilyTree = struct {
             }
         }
     };
-};
+
+    pub fn toJson(
+        self: FamilyTree,
+        _ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        // TODO make 2 if's 1
+        var res = util.ToJsonResult{
+            .value = undefined,
+            .arena = if (settings.apply_arena) ArenaAllocator.init(_ator) else null,
+        };
+        errdefer res.deinit();
+        const ator = if (res.arena) |*arena| arena.allocator() else _ator;
+        res.value = .{.Object = json.ObjectMap.init(ator)};
+        const settings_to_pass = util.ToJsonSettings{
+            .allow_overload=true,
+            .apply_arena=false,
+        };
+
+        var people_array = json.Value{.Array = json.Array.init(ator)};
+        try people_array.Array.ensureUnusedCapacity(self.pk2person_info.count());
+        var piter = self.pk2person_info.valueIterator();
+        while (piter.next()) |person_info| {
+            var person_json = (try person_info.person.toJson(ator, settings_to_pass)).value;
+            inline for (.{"father_key", "mother_key", "mit_mother_key"}) |ancestor_key| {
+                try person_json.Object.ensureUnusedCapacity(3); // DANGER
+                person_json.Object.putAssumeCapacity(
+                    ancestor_key,
+                    (try util.toJson(
+                        @field(person_info.fo_connections, ancestor_key),
+                        ator,
+                        settings_to_pass,
+                    )).value,
+                );
+            }
+            people_array.Array.appendAssumeCapacity(person_json);
+        }
+
+        var families_array = json.Value{.Array = json.Array.init(ator)};
+        try families_array.Array.ensureUnusedCapacity(self.fk2family.count());
+        var fiter = self.fk2family.valueIterator();
+        while (fiter.next()) |family| {
+            families_array.Array.appendAssumeCapacity(
+                (try family.toJson(ator, settings_to_pass)).value
+            );
+        }
+
+        try res.value.Object.put("people", people_array);
+        try res.value.Object.put("families", families_array);
+        return res;
+    }
+
+    pub fn personCount(self: FamilyTree) usize {
+        return self.pk2person_info.count();
+    }
+    pub fn familyCount(self: FamilyTree) usize {
+        return self.fk2family.count();
+    }
+
+    pub fn equal(
+        self: FamilyTree,
+        other: FamilyTree,
+        comptime settings: util.EqualSettings
+    ) bool {
+        _ = settings;
+        var lpiter = self.pk2person_info.iterator();
+        if (self.personCount() != other.personCount()) {
+            return false;
+        }
+        while (lpiter.next()) |lentry| {
+            if (other.pk2person_info.get(lentry.key_ptr.*)) |rinfo| {
+                if (!util.equal(lentry.value_ptr.*, rinfo, .{})) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        var lfiter = self.fk2family.iterator();
+        if (self.familyCount() != other.familyCount()) {
+            return false;
+        }
+        while (lfiter.next()) |lentry| {
+            if (other.fk2family.get(lentry.key_ptr.*)) |rval| {
+                if (!util.equal(lentry.value_ptr.*, rval, .{})) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+}; // FamilyTree
 
 
 
@@ -814,10 +900,10 @@ test "dangling people" {
         }
         var f = Family{.id=-1, .father_id=fkey, .mother_id=mkey};
         errdefer f.deinit(tator);
-        try f.children_ids.ensureUnusedCapacity(tator, 3);
-        f.children_ids.appendAssumeCapacity(c1key);
-        f.children_ids.appendAssumeCapacity(c2key);
-        f.children_ids.appendAssumeCapacity(c3key);
+        // try f.children_ids.data.ensureUnusedCapacity(tator, 3);
+        try f.addChild(c1key, tator);
+        try f.addChild(c2key, tator);
+        try f.addChild(c3key, tator);
         _ = try ft.registerFamily(&f);
     }
     try expect(try ft.hasNoDanglingPersonKeysFamiliesShallow());
@@ -881,9 +967,9 @@ test "assign people, families" {
     try expect(mip.fo_connections.hasChild(c3k));
     const famk: FamilyTree.FamilyKey = 1;
     var fam = Family{.id=famk, .father_id=fk, .mother_id=mk};
-    try fam.children_ids.append(tator, c1k);
-    try fam.children_ids.append(tator, c2k);
-    try fam.children_ids.append(tator, c3k);
+    try fam.addChild(c1k, tator);
+    try fam.addChild(c2k, tator);
+    try fam.addChild(c3k, tator);
     try expectEqual(famk, try tree.registerFamily(&fam));
     const folks = [_]FamilyTree.PersonKey{fk, mk, c1k, c2k, c3k};
     for (folks) |k| {
@@ -926,9 +1012,9 @@ test "build connections" {
     c3ip.fo_connections.mother_key = mk;
     const famk: FamilyTree.FamilyKey = 1;
     var fam = Family{.id=famk, .father_id=fk, .mother_id=mk};
-    try fam.children_ids.append(tator, c1k);
-    try fam.children_ids.append(tator, c2k);
-    try fam.children_ids.append(tator, c3k);
+    try fam.addChild(c1k, tator);
+    try fam.addChild(c2k, tator);
+    try fam.addChild(c3k, tator);
     try expectEqual(famk, try tree.registerFamily(&fam));
     const folks = [_]FamilyTree.PersonKey{fk, mk, c1k, c2k, c3k};
 
@@ -953,9 +1039,9 @@ test "build connections" {
     }
 
     const fam_ptr = tree.getFamilyPtr(famk).?;
-    try fam_ptr.children_ids.append(tator, 6);
+    try fam_ptr.addChild(6, tator);
     try expectError(anyerror.person_not_registered, tree.buildConnections());
-    _ = fam_ptr.children_ids.pop();
+    _ = fam_ptr.children_ids.data.pop();
     try tree.buildConnections();
     fip.fo_connections.father_key = 6;
     try expectError(anyerror.person_not_registered, tree.buildConnections());
@@ -1008,6 +1094,18 @@ test "read from json" {
     try expect(family.hasChild(2));
     try expect(family.hasChild(3));
     try expect(!family.hasChild(4));
+}
+
+test "to json" {
+    var ft = FamilyTree.init(tator, .{.seed=0});
+    defer ft.deinit();
+    try ft.readFromJsonSourceStr(healthy_family_src, .{});
+    var jft = try ft.toJson(tator, .{});
+    defer jft.deinit();
+    var tf = FamilyTree.init(tator, .{.seed=0});
+    defer tf.deinit();
+    try tf.readFromJson(&jft.value, .{});
+    try expect(util.equal(ft, tf, .{}));
 }
 
 

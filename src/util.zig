@@ -186,7 +186,7 @@ fn array2json(
             }
         },
         else => {
-            @compileError("util.array2jsonArr(): " ++ @typeName(ArgType) ++ " is not array");
+            @compileError("util.array2json(): " ++ @typeName(ArgType) ++ " is not array");
         },
     }
     return res;
@@ -221,7 +221,7 @@ fn struct2json(
             }
         },
         else => {
-            @compileError("util.struct2jsonObj(): " ++ @typeName(ArgType) ++ " is not struct");
+            @compileError("util.struct2json(): " ++ @typeName(ArgType) ++ " is not struct");
         },
     }
     return res;
