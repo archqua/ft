@@ -5,7 +5,7 @@ const logger = std.log.scoped(.ft);
 const util = @import("util.zig");
 
 pub const Date = struct {
-    /// comptime interfaces: [ readFromJson ]
+    /// comptime interfaces: [ readFromJson, toJson ]
     day: ?u8 = null,
     month: ?u8 = null,
     year: ?i32 = null,
@@ -191,44 +191,12 @@ pub const Date = struct {
             },
         }
     }
-    // pub fn toJson(self: Date, ator: Allocator) json.ObjectMap {
-    //     var res = json.ObjectMap.init(ator);
-    //     errdefer res.deinit();
-    //     inline for (@typeInfo(Date).Struct.fields) |field| {
-    //         res.put(
-    //             field.name,
-    //             blk: {
-    //                 switch (@typeInfo(field.field_type)) {
-    //                     .Struct => {
-    //                         if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
-    //                             break :blk @field(self, field.name).toJson(ator);
-    //                         } else {
-    //                             break :blk @field(self, field.name);
-    //                         }
-    //                     },
-    //                     else => {
-    //                         break :blk @unionInit(
-    //                                        json.Value,
-    //                                        util.type2jtag(field.field_type).asText(),
-    //                                        @field(self, field.name)
-    //                                     );
-    //                     },
-    //                 }
-    //             },
-    //             // if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
-    //             //     @field(self, field.name).toJson(ator);
-    //             // } else {
-    //             //     @field(self, field.name);
-    //             // }
-    //         );
-    //     }
-    //     return res;
-    // }
 };
 
 
 const testing = std.testing;
 const expect = testing.expect;
+const expectEqual = testing.expectEqual;
 const expectError = testing.expectError;
 
 const christ_birthday_source = 
@@ -294,6 +262,9 @@ test "errors" {
 test "to json" {
     var date = Date{.day = 1};
     var j_date = try util.toJson(date, testing.allocator, .{});
-    defer j_date.Object.deinit();
-    _ = j_date;
+    defer j_date.deinit();
+    var j_map = j_date.value.Object;
+    try expectEqual(j_map.get("day").?.Integer, 1);
+    try expectEqual(j_map.get("month").?.Null, {});
+    try expectEqual(j_map.get("year").?.Null, {});
 }

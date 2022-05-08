@@ -27,6 +27,8 @@ return struct {
 };
 }
 
+pub const DictError = error { put_clobber, OutOfMemory, };
+
 fn WarpedUnmanaged(comptime StdHashedUnmanaged: fn (type) type) fn (type) type {
 // frees key-strings on deinit
 return struct {
@@ -42,7 +44,7 @@ return struct {
         StringArrayHashMapUnmanaged => usize,
         else => @compileError("WarpedUnmanaged.Size nonexhaustive switch on StdHashedUnmanaged"),
     };
-    pub const Error = error { put_clobber, OutOfMemory, };
+    pub const Error = DictError;
     pub fn deinit(this: *Self, ator: Allocator) void {
         var key_it = this.keyIterator();
         while (key_it.next()) |key_ptr| {
@@ -140,20 +142,20 @@ return struct {
         }
         try this.rawPut(key, val, ator, options);
     }
-    pub fn get(this: *Self, key: K) ?V {
+    pub fn get(this: Self, key: K) ?V {
         return this.data.get(key);
     }
-    pub fn getPtr(this: *Self, key: K) ?*V {
+    pub fn getPtr(this: Self, key: K) ?*V {
         return this.data.getPtr(key);
     }
-    pub fn getKey(this: *Self, key: K) ?K {
+    pub fn getKey(this: Self, key: K) ?K {
         return this.data.getKey(key);
     }
-    pub fn getKeyPtr(this: *Self, key: K) ?*K {
+    pub fn getKeyPtr(this: Self, key: K) ?*K {
         return this.data.getKeyPtr(key);
     }
     pub const Entry = Data.Entry;
-    pub fn getEntry(this: *Self, key: K) ?Entry {
+    pub fn getEntry(this: Self, key: K) ?Entry {
         return this.data.getEntry(key);
     }
     pub fn remove(this: *Self, key: K, ator: Allocator) bool {
@@ -280,8 +282,19 @@ return struct {
     pub fn count(self: Self) Size {
         return self.data.count();
     }
-    pub fn toJson(self: Self, ator: Allocator) !json.Value {
-        return dictLikeToJson(self, ator);
+    pub fn toJson(
+        self: Self,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return dictLikeToJson(self, ator, settings);
+    }
+    pub fn equal(
+        lhs: anytype,
+        rhs: anytype,
+        comptime settings: util.EqualSettings,
+    ) bool {
+        return dictLikeEqual(lhs, rhs, settings);
     }
 };
 }
@@ -304,7 +317,7 @@ return struct {
         StringArrayHashMap => usize,
         else => @compileError("Warped.Size nonexhaustive switch on StdHashed"),
     };
-    pub const Error = error { put_clobber, OutOfMemory, };
+    pub const Error = DictError;
     pub fn init(ator: Allocator) Self {
         return Self{.data=Data.init(ator), .ator=ator};
     }
@@ -400,20 +413,20 @@ return struct {
         }
         try this.rawPut(key, val, options);
     }
-    pub fn get(this: *Self, key: K) ?V {
+    pub fn get(this: Self, key: K) ?V {
         return this.data.get(key);
     }
-    pub fn getPtr(this: *Self, key: K) ?*V {
+    pub fn getPtr(this: Self, key: K) ?*V {
         return this.data.getPtr(key);
     }
-    pub fn getKey(this: *Self, key: K) ?K {
+    pub fn getKey(this: Self, key: K) ?K {
         return this.data.getKey(key);
     }
-    pub fn getKeyPtr(this: *Self, key: K) ?*K {
+    pub fn getKeyPtr(this: Self, key: K) ?*K {
         return this.data.getKeyPtr(key);
     }
     pub const Entry = Data.Entry;
-    pub fn getEntry(this: *Self, key: K) ?Entry {
+    pub fn getEntry(this: Self, key: K) ?Entry {
         return this.data.getEntry(key);
     }
     pub fn remove(this: *Self, key: K) bool {
@@ -541,33 +554,79 @@ return struct {
     pub fn count(self: Self) Size {
         return self.data.count();
     }
-    pub fn toJson(self: Self, ator: Allocator) !json.Value {
-        return dictLikeToJson(self, ator);
+    pub fn toJson(
+        self: Self,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return dictLikeToJson(self, ator, settings);
+    }
+    pub fn equal(
+        lhs: anytype,
+        rhs: anytype,
+        comptime settings: util.EqualSettings,
+    ) bool {
+        return dictLikeEqual(lhs, rhs, settings);
     }
 };
 }
 }.val_t;
 }
 
-pub fn dictLikeToJson(self: anytype, ator: Allocator) !json.Value {
-    var res = json.ObjectMap.init(ator);
+pub fn dictLikeToJson(
+    self: anytype,
+    _ator: Allocator,
+    comptime settings: util.ToJsonSettings,
+) util.ToJsonError!util.ToJsonResult {
+    // TODO make 2 if's 1
+    var res = util.ToJsonResult{
+        .value = undefined,
+        .arena = if (settings.apply_arena) ArenaAllocator.init(_ator) else null,
+    };
     errdefer res.deinit();
+    const ator = if (res.arena) |*arena| arena.allocator() else _ator;
+    res.value = .{.Object=json.ObjectMap.init(ator)};
+    const settings_to_pass = util.ToJsonSettings{
+        .allow_overload = settings.allow_overload, // must be true
+        .apply_arena    = false,
+    };
+    try res.value.Object.ensureUnusedCapacity(self.count());
     var viter = self.valueIterator();
     var kiter = self.keyIterator();
     while (viter.next()) |val| {
         if (kiter.next()) |key| {
-            var value = try util.toJson(val.*, ator, .{});
-            errdefer switch(value) {
-                .Object => |*obj| obj.deinit(),
-                .Array => |*arr| arr.deinit(),
-                else => {},
-            };
-            try res.put(key.*, value);
+            var value = try util.toJson(val.*, ator, settings_to_pass);
+            // TODO should it be no-clobber???
+            res.value.Object.putAssumeCapacity(key.*, value.value);
         } else {
             break;
         }
     }
-    return @unionInit(json.Value, "Object", res);
+    return res;
+}
+
+pub fn dictLikeEqual(
+    lhs: anytype,
+    rhs: anytype,
+    comptime settings: util.EqualSettings,
+) bool {
+    if (lhs.count() != rhs.count()) {
+        std.debug.print("\n{d} != {d}: count mismatch\n", .{lhs.count(), rhs.count()});
+        return false;
+    }
+    var liter = lhs.iterator();
+    while (liter.next()) |lentry| {
+        if (rhs.get(lentry.key_ptr.*)) |rval| {
+            if (!util.equal(lentry.value_ptr.*, rval, settings)) {
+                std.debug.print("\n{s} key mismatch!\n", .{lentry.key_ptr.*});
+                return false;
+            }
+        } else {
+            std.debug.print("\n{s} key abscence!\n", .{lentry.key_ptr.*});
+            return false;
+        }
+    }
+    return true;
 }
 
 pub const DictUnmanaged = WarpedUnmanaged(StringHashMapUnmanaged);
@@ -763,18 +822,18 @@ test "to json" {
         var dict = DictUnmanaged(i64){};
         defer dict.deinit(tator);
         try dict.put("key1", 1, tator, .{.kopy=true});
-        var j_dict_ = try dict.toJson(tator);
-        var j_dict = j_dict_.Object;
-        defer j_dict.deinit();
+        var j_dict_ = try dict.toJson(tator, .{});
+        defer j_dict_.deinit();
+        var j_dict = j_dict_.value.Object;
         try expectEqual(dict.get("key1").?, j_dict.get("key1").?.Integer);
     }
     {
         var dict = Dict(i64).init(tator);
         defer dict.deinit();
         try dict.put("key1", 1, .{.kopy=true});
-        var j_dict_ = try dict.toJson(tator);
-        var j_dict = j_dict_.Object;
-        defer j_dict.deinit();
+        var j_dict_ = try dict.toJson(tator, .{});
+        defer j_dict_.deinit();
+        var j_dict = j_dict_.value.Object;
         try expectEqual(dict.get("key1").?, j_dict.get("key1").?.Integer);
     }
 
@@ -785,10 +844,9 @@ test "to json" {
         defer dict.deinit();
         try dict.put("key", 1, .{.kopy=true});
         try ddict.put("kkey", dict, .{.kopy=true});
-        var j_ddict_ = try ddict.toJson(tator);
-        var j_ddict = j_ddict_.Object;
-        defer j_ddict.deinit();
-        defer j_ddict.get("kkey").?.Object.deinit();
+        var j_ddict_ = try ddict.toJson(tator, .{});
+        defer j_ddict_.deinit();
+        var j_ddict = j_ddict_.value.Object;
         try expectEqual(
             ddict.get("kkey").?.get("key"),
             j_ddict.get("kkey").?.Object.get("key").?.Integer,

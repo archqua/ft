@@ -3,6 +3,7 @@ const json = std.json;
 const person_module = @import("person.zig");
 const date_module = @import("date.zig");
 const notes_module = @import("notes.zig");
+const util = @import("util.zig");
 const logger = std.log.scoped(.ft);
 
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
@@ -13,12 +14,13 @@ const Person = person_module.Person;
 
 pub const Family = struct {
     id: Id,
+    // families are meant to be purely social,
+    // family trees handle blood connections
     father_id: ?Person.Id = null,
     mother_id: ?Person.Id = null,
     marriage_date: ?Date = null,
     divorce_date: ?Date = null,
-    // these are not necessarily by-blood
-    children_ids: ArrayListUnmanaged(Person.Id) = .{},
+    children_ids: ChildrenIds = .{},
 
     pub const Id = i64;
     pub const FromJsonError = error {
@@ -30,14 +32,15 @@ pub const Family = struct {
         this.children_ids.deinit(ator);
     }
     pub fn addChild(this: *Family, child_id: Person.Id, ator: Allocator) !void {
-        try this.children_ids.append(ator, child_id);
+        try this.children_ids.addChild(child_id, ator);
     }
     pub fn hasChild(self: Family, candidate: Person.Id) bool {
-        for (self.children_ids.items) |child_id| {
-            if (child_id == candidate)
-                return true;
-        }
-        return false;
+        return self.children_ids.hasChild(candidate);
+        // for (self.children_ids.items) |child_id| {
+        //     if (child_id == candidate)
+        //         return true;
+        // }
+        // return false;
     }
     pub fn readFromJson(
         this: *Family,
@@ -85,40 +88,24 @@ pub const Family = struct {
                                 }
                             },
                             ?Date => {
-                                var field_ptr = &@field(this, field.name);
-                                if (null == field_ptr.*) {
-                                    field_ptr.* = .{};
-                                    errdefer field_ptr.* = null;
-                                    try field_ptr.*.?.readFromJson(val);
+                                switch (val) {
+                                    .Null => {
+                                        @field(this, field.name) = null;
+                                    },
+                                    else => {
+                                        var field_ptr = &@field(this, field.name);
+                                        if (null == field_ptr.*) {
+                                            field_ptr.* = .{};
+                                            errdefer field_ptr.* = null;
+                                            try field_ptr.*.?.readFromJson(val);
+                                        } else {
+                                            try field_ptr.*.?.readFromJson(val);
+                                        }
+                                    },
                                 }
                             },
-                            ArrayListUnmanaged(Person.Id) => {
-                                if (allocator) |ator| {
-                                    switch (val) {
-                                        json.Value.Array => |arr| {
-                                            try copyFromJsonArr(
-                                                    &this.children_ids,
-                                                    arr,
-                                                    ator,
-                                                );
-                                        },
-                                        else => {
-                                            logger.err(
-                                                "in Family.readFromJson()" ++
-                                                " j_family.get(\"{s}\")" ++
-                                                " is not of type {s}"
-                                                , .{field.name, "json.Array"}
-                                            );
-                                            return FromJsonError.bad_field;
-                                        },
-                                    }
-                                } else {
-                                    logger.err(
-                                        "in Family.readFromJson() allocator required"
-                                        , .{}
-                                    );
-                                    return FromJsonError.allocator_required;
-                                }
+                            ChildrenIds => {
+                                try @field(this, field.name).readFromJson(val, allocator);
                             },
                             else => {
                                 @compileError("Family.readFromJson() nonexhaustive switch on field_type");
@@ -133,6 +120,100 @@ pub const Family = struct {
                     , .{"json.ObjectMap"}
                 );
                 return FromJsonError.bad_type;
+            },
+        }
+    }
+    pub fn readFromJsonSourceStr(
+        this: *Family,
+        source_str: []const u8,
+        ator: Allocator,
+    ) !void {
+        var parser = json.Parser.init(ator, false); // strings are copied in readFromJson
+        defer parser.deinit();
+        var tree = try parser.parse(source_str);
+        defer tree.deinit();
+        try this.readFromJson(tree.root, ator);
+    }
+    // pub fn toJson(self: Family, ator: Allocator) json.ObjectMap {
+    //     var res = json.ObjectMap.init(ator);
+    //     errdefer res.deinit();
+    //     inline for (@typeInfo(Family).Struct.fields) |field| {
+    //         res.put(
+    //             field.name,
+    //             if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
+    //                 @field(self, field.name).toJson();
+    //             } else {
+    //                 @field(self, field.name);
+    //             }
+    //         );
+    //     }
+    //     return res;
+    // }
+
+    pub fn toJson(
+        self: Family,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(
+            self, ator,
+            .{.allow_overload=false, .apply_arena=settings.apply_arena},
+        );
+    }
+
+    pub const ParentEnum = enum {
+        father, mother,
+        pub fn asText(comptime self: ParentEnum) switch (self) {
+            .father => @TypeOf("father"),
+            .mother => @TypeOf("mother"),
+        } {
+            return switch (self) {
+                .father => "father",
+                .mother => "mother",
+            };
+        }
+    };
+};
+
+pub const ChildrenIds = struct {
+    data: ArrayListUnmanaged(Person.Id) = .{},
+
+    pub const FromJsonError = error {
+        bad_field, bad_field_val, allocator_required,
+    };
+    pub fn readFromJson(
+        this: *ChildrenIds,
+        json_children: json.Value,
+        allocator: ?Allocator,
+    ) !void {
+        switch (json_children) {
+            json.Value.Array => |arr| {
+                if (arr.items.len > 0) {
+                    if (allocator) |ator| {
+                        try copyFromJsonArr(
+                                &this.data,
+                                arr,
+                                ator,
+                            );
+                    } else {
+                        logger.err(
+                            "in Family.readFromJson() allocator required"
+                            , .{}
+                        );
+                        return FromJsonError.allocator_required;
+                    }
+                } else {
+                    return;
+                }
+            },
+            else => {
+                logger.err(
+                    "in Family.readFromJson()" ++
+                    " j_family.get(\"{s}\")" ++
+                    " is not of type {s}"
+                    , .{"children_ids", "json.Array"}
+                );
+                return FromJsonError.bad_field;
             },
         }
     }
@@ -169,47 +250,40 @@ pub const Family = struct {
             }
         }
     }
-    pub fn readFromJsonSourceStr(
-        this: *Family,
-        source_str: []const u8,
+
+    pub fn toJson(
+        self: ChildrenIds,
         ator: Allocator,
-    ) !void {
-        var parser = json.Parser.init(ator, false); // strings are copied in readFromJson
-        defer parser.deinit();
-        var tree = try parser.parse(source_str);
-        defer tree.deinit();
-        try this.readFromJson(tree.root, ator);
-    }
-    pub fn toJson(self: Family, ator: Allocator) json.ObjectMap {
-        var res = json.ObjectMap.init(ator);
-        errdefer res.deinit();
-        inline for (@typeInfo(Family).Struct.fields) |field| {
-            res.put(
-                field.name,
-                if (@hasDecl(@TypeOf(@field(self, field.name)), "toJson")) {
-                    @field(self, field.name).toJson();
-                } else {
-                    @field(self, field.name);
-                }
-            );
-        }
-        return res;
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(self.data.items, ator, settings);
     }
 
-    pub const ParentEnum = enum {
-        father, mother,
-        pub fn asText(comptime self: ParentEnum) switch (self) {
-            .father => @TypeOf("father"),
-            .mother => @TypeOf("mother"),
-        } {
-            return switch (self) {
-                .father => "father",
-                .mother => "mother",
-            };
+    pub fn deinit(this: *ChildrenIds, ator: Allocator) void {
+        this.data.deinit(ator);
+    }
+    pub fn addChild(this: *ChildrenIds, child_id: Person.Id, ator: Allocator) !void {
+        try this.data.append(ator, child_id);
+    }
+    pub fn hasChild(self: ChildrenIds, candidate: Person.Id) bool {
+        for (self.data.items) |child_id| {
+            if (child_id == candidate)
+                return true;
         }
-    };
+        return false;
+    }
+
+    // pub fn equal(
+    //     self: ChildrenIds,
+    //     other: ChildrenIds,
+    //     comptime settings: util.EqualSettings,
+    // ) bool {
+    //     if (self.data.count() != other.data.count()) {
+    //         return false;
+    //     }
+    //     for (self.data)
+    // }
 };
-
 
 const testing = std.testing;
 const tator = testing.allocator;
@@ -297,9 +371,9 @@ test "basic" {
         try expectEqual(family.divorce_date, null);
         try expectEqual(family.father_id, 1);
         try expectEqual(family.mother_id, 2);
-        try expectEqual(family.children_ids.items.len, 2);
-        try expectEqual(family.children_ids.items[0], 3);
-        try expectEqual(family.children_ids.items[1], 4);
+        try expectEqual(family.children_ids.data.items.len, 2);
+        try expectEqual(family.children_ids.data.items[0], 3);
+        try expectEqual(family.children_ids.data.items[1], 4);
     }
 }
 
@@ -384,11 +458,23 @@ test "add child" {
         try expect(!family.hasChild(4));
         try family.addChild(son.id, tator);
         try family.addChild(daughter.id, tator);
-        try expectEqual(family.children_ids.items[0], 3);
-        try expectEqual(family.children_ids.items[1], 4);
+        try expectEqual(family.children_ids.data.items[0], 3);
+        try expectEqual(family.children_ids.data.items[1], 4);
         try expect(family.hasChild(3));
         try expect(family.hasChild(4));
     }
+}
+
+test "to json" {
+    var family = Family{.id = undefined};
+    defer family.deinit(tator);
+    try family.readFromJsonSourceStr(family_source, tator);
+    var j_family = try family.toJson(tator, .{});
+    defer j_family.deinit();
+    var ylimaf = Family{.id = undefined};
+    defer ylimaf.deinit(tator);
+    try ylimaf.readFromJson(j_family.value, tator);
+    try expect(util.equal(family, ylimaf, .{}));
 }
 
 fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {

@@ -141,6 +141,7 @@ pub fn toJson(
             }
         },
         .Pointer => |pointer_info| {
+            // TODO inspect pointer_info.size
             switch (pointer_info.child) {
                 u8 => {
                     res.value = .{.String=arg};
@@ -180,7 +181,7 @@ fn array2json(
             try res.value.Array.ensureUnusedCapacity(arg.len);
             for (arg) |item| {
                 res.value.Array.appendAssumeCapacity(
-                    try toJson(item, ator, settings_to_pass)
+                    (try toJson(item, ator, settings_to_pass)).value
                 );
             }
         },
@@ -203,7 +204,7 @@ fn struct2json(
         .arena = if (settings.apply_arena) ArenaAllocator.init(_ator) else null,
     };
     errdefer res.deinit();
-    var ator = if (res.arena) |*arena| arena.allocator() else _ator;
+    const ator = if (res.arena) |*arena| arena.allocator() else _ator;
     res.value = .{.Object=json.ObjectMap.init(ator)};
     const settings_to_pass = ToJsonSettings{
         .allow_overload = settings.allow_overload, // must be true
@@ -224,6 +225,85 @@ fn struct2json(
         },
     }
     return res;
+}
+
+pub const EqualSettings = struct {
+    allow_overload: bool = true,
+};
+
+pub fn equal(
+    lhs: anytype,
+    rhs: anytype,
+    comptime settings: EqualSettings,
+) bool {
+    const ArgType = @TypeOf(lhs);
+    switch (@typeInfo(ArgType)) {
+        .Optional => {
+            if (lhs) |lval| {
+                if (rhs) |rval| {
+                    return equal(lval, rval, .{.allow_overload=true});
+                } else {
+                    return false;
+                }
+            } else {
+                if (rhs) |_| {
+                    return false;
+                } else {
+                    return true;
+                }
+            }
+        },
+        .Int, .Float => {
+            return lhs == rhs;
+        },
+        .Struct => |struct_info| {
+            if (@hasDecl(ArgType, "equal") and settings.allow_overload) {
+                return lhs.equal(rhs, .{.allow_overload=true});
+            }
+            inline for (struct_info.fields) |field| {
+                const _lhs = @field(lhs, field.name);
+                const _rhs = @field(rhs, field.name);
+                if (!equal(_lhs, _rhs, .{.allow_overload=true})) {
+                    std.debug.print("\n{s} field mismatch!\n", .{field.name});
+                    // std.debug.print("\n{} != {}\n", .{_lhs, _rhs});
+                    return false;
+                }
+            }
+            return true;
+        },
+        .Array => {
+            if (lhs.len != rhs.len) {
+                return false;
+            }
+            for (lhs) |_lhs, i| {
+                if (!equal(_lhs, rhs[i], settings)) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        .Pointer => |pointer_info| {
+            switch (pointer_info.size) {
+                .Slice => {
+                    if (lhs.len != rhs.len) {
+                        return false;
+                    }
+                    for (lhs) |_lhs, i| {
+                        if (!equal(_lhs, rhs[i], settings)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                },
+                else => {
+                    return lhs == rhs;
+                },
+            }
+        },
+        else => {
+            @compileError("util.equal(): don't know what to do w/ " ++ @typeName(ArgType));
+        },
+    }
 }
 
 const testing = std.testing;

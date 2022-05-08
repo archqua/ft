@@ -205,38 +205,6 @@ pub const Notes = struct {
         }
         return res;
     }
-    // pub fn toJson(self: Notes, ator: Allocator) util.ToJsonError!json.Value {
-    //     // TODO use max_depth
-    //     var arena = ArenaAllocator.init(ator);
-    //     const aator = arena.allocator();
-    //     var res = json.ObjectMap.init(aator);
-    //     errdefer arena.deinit();
-    //     inline for (@typeInfo(Notes).Struct.fields) |field| {
-    //         switch (field.field_type) {
-    //             DictArrayUnmanaged(Notes) => {
-    //                 var j_subnotes = json.ObjectMap.init(aator);
-    //                 var iter = self.child_nodes.iterator();
-    //                 while (iter.next()) |entry| {
-    //                     try j_subnotes.put(
-    //                         entry.key_ptr.*,
-    //                         try entry.value_ptr.toJson(ator),
-    //                     ); // ator, not aator here
-    //                 }
-    //                 try res.put(
-    //                     field.name,
-    //                     @unionInit(json.Value, "Object", j_subnotes),
-    //                 );
-    //             },
-    //             else => {
-    //                 try res.put(
-    //                     field.name,
-    //                     try util.toJson(@field(self, field.name), ator, .{}),
-    //                 );
-    //             },
-    //         }
-    //     }
-    //     return @unionInit(json.Value, "Object", res);
-    // }
 
     pub fn clone(self: Notes, ator: Allocator) !Notes {
         logger.debug("Notes.clone() w/ ator={*}", .{ator.vtable});
@@ -419,9 +387,16 @@ test "to json" {
     var notes = Notes{};
     try notes.readFromJson(&tree.root, tator, .copy);
     defer notes.deinit(tator);
-    var j_notes = try util.toJson(notes, tator, .{});
-    defer j_notes.Object.deinit();
-    _ = j_notes;
+    var j_notes_ = try util.toJson(notes, tator, .{});
+    defer j_notes_.deinit();
+    var j_notes = j_notes_.value.Object;
+    try expect(util.strEqual(notes.text, j_notes.get("text").?.String));
+    var subnotes = notes.child_nodes.get("node1").?;
+    var j_subnotes = j_notes.get("child_nodes").?.Object;
+    try expect(util.strEqual(subnotes.text, j_subnotes.get("node1").?.Object.get("text").?.String));
+    var subsubnotes = subnotes.child_nodes.get("node2").?;
+    var j_subsubnotes = j_subnotes.get("node1").?.Object.get("child_nodes").?.Object;
+    try expect(util.strEqual(subsubnotes.text, j_subsubnotes.get("node2").?.Object.get("text").?.String));
 }
 
 fn strCopyAlloc(from: []const u8, ator: Allocator) ![]u8 {

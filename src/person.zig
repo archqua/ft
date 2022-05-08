@@ -116,8 +116,15 @@ pub const Person = struct {
         defer tree.deinit();
         try this.readFromJson(&tree.root, ator, options);
     }
-    pub fn toJson(self: Person, ator: Allocator) !json.Value {
-        return util.toJson(self, ator, .{.allow_overload=false});
+    pub fn toJson(
+        self: Person,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(
+            self, ator,
+            .{.allow_overload=false, .apply_arena=settings.apply_arena},
+        );
     }
 
     // pub fn rename(
@@ -351,13 +358,16 @@ pub const NameList = struct {
         this.data.deinit(ator);
     }
 
-    pub const FromJsonError = error { bad_type, allocator_required, };
+    pub const FromJsonError = error {
+        bad_type, bad_field, // bad_field is required by Name
+        allocator_required,
+    };
     pub fn readFromJson(
         this: *NameList,
         json_name_list: *json.Value,
         allocator: anytype,
         comptime options: util.StrMgmt,
-    ) !void {
+    ) (dict_module.DictError||FromJsonError) ! void {
         if (util.allocatorCapture(allocator)) |ator| { // can't check allocator at comptime
             logger.debug(
                 "NameList.readFromJson() w/ ator={*}, options={s}"
@@ -427,6 +437,14 @@ pub const NameList = struct {
             logger.err("in NameList.readFromJson() allocator required", .{});
             return FromJsonError.allocator_required;
         }
+    }
+
+    pub fn toJson(
+        self: NameList,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(self.data, ator, settings);
     }
 };
 
@@ -612,13 +630,16 @@ pub const SurnameList = struct {
         this.data.deinit(ator);
     }
 
-    pub const FromJsonError = error { bad_type, bad_field, allocator_required, };
+    pub const FromJsonError = error {
+        bad_type, bad_field, // bad_field is required by Name
+        allocator_required,
+    };
     pub fn readFromJson(
         this: *SurnameList,
         json_surname_list: *json.Value,
         allocator: anytype,
         comptime options: util.StrMgmt,
-    ) !void {
+    ) (dict_module.DictError||FromJsonError) ! void {
         if (util.allocatorCapture(allocator)) |ator| {
             logger.debug(
                 "Person.readFromJson() w/ ator={*}, options={s}"
@@ -689,6 +710,14 @@ pub const SurnameList = struct {
             return FromJsonError.allocator_required;
         }
     }
+
+    pub fn toJson(
+        self: SurnameList,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(self.data, ator, settings);
+    }
 };
 
 
@@ -707,7 +736,7 @@ return struct {
         json_patronymic: *json.Value,
         allocator: anytype,
         comptime options: util.StrMgmt,
-    ) !void {
+    ) (dict_module.DictError||FromJsonError) ! void {
         util.AOCheck(allocator, options);
         logger.debug("{s}.readFromJson() w/ options={s}", .{type_name, options.asText()});
         switch (json_patronymic.*) {
@@ -729,6 +758,14 @@ return struct {
                     },
                 }
             },
+            // huge json{"date": {"date": {"date": ...}}} could cause stack overflow
+            // json.Value.Object => |map| {
+            //     if (map.get("data")) |*j_data| {
+            //         try this.readFromJson(j_data, allocator, options);
+            //     } else {
+            //         this.data = "";
+            //     }
+            // },
             else => {
                 logger.err(
                     "in {s}.readFromJson() j_{s} is not of type {s}"
@@ -737,6 +774,14 @@ return struct {
                 return FromJsonError.bad_type;
             },
         }
+    }
+
+    pub fn toJson(
+        self: @This(),
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(self.data, ator, settings);
     }
 };
 }
@@ -816,8 +861,20 @@ pub const Sex = struct {
             },
         }
     }
-    pub fn toJson(self: Sex, ator: Allocator) !json.Value {
-        return util.toJson(self.asText(), ator, .{});
+    pub fn toJson(
+        self: Sex,
+        ator: Allocator,
+        comptime settings: util.ToJsonSettings,
+    ) util.ToJsonError!util.ToJsonResult {
+        return util.toJson(self.asText(), ator, settings);
+    }
+    pub fn equal(
+        self: Sex,
+        other: Sex,
+        comptime settings: util.EqualSettings,
+    ) bool {
+        _ = settings;
+        return self.data == other.data;
     }
 };
 
@@ -989,12 +1046,6 @@ test "notes" {
         try human.readFromJsonSourceStr(human_full_source, tator, .copy);
         try expect(util.strEqual("", human.notes.text));
         try expectEqual(@as(usize,0), human.notes.child_nodes.count());
-        // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        // const ator = gpa.allocator();
-        // defer human.deinit(ator);
-        // try human.readFromJsonSourceStr(human_full_source, ator, .copy);
-        // try expect(util.strEqual("", human.notes.text));
-        // try expectEqual(@as(usize,0), human.notes.child_nodes.count());
     }
     {
         var human = Person{.id=undefined};
@@ -1198,17 +1249,15 @@ test "errors" {
 }
 
 test "to json" {
-    std.debug.print("to json test\n", .{});
     var person = Person{.id = undefined};
     defer person.deinit(tator);
     try person.readFromJsonSourceStr(human_full_source , tator, .copy);
-    std.debug.print("trying toJson\n", .{});
-    var j_person = try person.toJson(tator);
-    std.debug.print("toJson\n", .{});
-    defer j_person.Object.deinit();
+    var j_person = try person.toJson(tator, .{});
+    defer j_person.deinit();
     var nosrep = Person{.id = undefined};
     defer nosrep.deinit(tator);
-    try nosrep.readFromJson(&j_person, tator, .copy);
+    try nosrep.readFromJson(&j_person.value, tator, .copy);
+    try expect(util.equal(person, nosrep, .{}));
 }
 
 
